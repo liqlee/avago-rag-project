@@ -1,0 +1,56 @@
+apiVersion: serving.kserve.io/v1beta1
+kind: InferenceService
+metadata:
+  name: granite-guardian
+  namespace: rag-models
+  annotations:
+    serving.kserve.io/deploymentMode: RawDeployment
+    security.opendatahub.io/enable-auth: "false"
+    openshift.io/display-name: "Granite Guardian 3.3 8B (GGUF Q4)"
+    openshift.io/description: "IBM Granite Guardian 3.3 8B for groundedness verification and hallucination detection"
+    opendatahub.io/model-type: safety-classifier
+    argocd.argoproj.io/sync-wave: "8"
+  labels:
+    opendatahub.io/dashboard: "true"
+spec:
+  predictor:
+    model:
+      modelFormat:
+        name: gguf
+      runtime: llamacpp-cpu
+      storage:
+        key: minio
+        path: granite-guardian
+      args:
+        - -m
+        - /mnt/models/granite-guardian-3.3-8b-Q4_K_M.gguf
+        - -c
+        - "4096"
+        - -t
+        - "8"
+      resources:
+        requests:
+          cpu: "8"
+          memory: "8Gi"
+        limits:
+          cpu: "8"
+          memory: "10Gi"
+    maxReplicas: 1
+    minReplicas: 1
+    timeout: 300
+---
+# Bypass Service — preserves the orchestrator's existing URL
+# (guardian.rag-models.svc:8080)
+apiVersion: v1
+kind: Service
+metadata:
+  name: guardian
+  namespace: rag-models
+  annotations:
+    argocd.argoproj.io/sync-wave: "8"
+spec:
+  selector:
+    serving.kserve.io/inferenceservice: granite-guardian
+  ports:
+    - port: 8080
+      targetPort: 8080

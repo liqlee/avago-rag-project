@@ -1,0 +1,37 @@
+# Python
+__pycache__/
+*.pyc
+*.pyo
+*.egg-info/
+dist/
+build/
+.venv/
+venv/
+
+# PDFs and large binaries
+manuals/
+
+# OpenShift installer artifacts
+auth/
+metadata.json
+terraform.*
+*.tfstate
+.openshift_install*
+bootstrap.ign
+master.ign
+worker.ign
+
+# Secrets
+cluster/install-config.yaml
+**/install-config.yaml.bak
+**/kubeadmin-password
+
+# IDE
+.idea/
+.vscode/
+*.swp
+*.swo
+
+# OS
+.DS_Store
+Thumbs.db

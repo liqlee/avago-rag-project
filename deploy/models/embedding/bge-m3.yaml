@@ -1,0 +1,52 @@
+apiVersion: serving.kserve.io/v1beta1
+kind: InferenceService
+metadata:
+  name: bge-m3
+  namespace: rag-models
+  annotations:
+    serving.kserve.io/deploymentMode: RawDeployment
+    security.opendatahub.io/enable-auth: "false"
+    openshift.io/display-name: "BGE-M3 Embedding"
+    openshift.io/description: "BAAI BGE-M3 dense embedding model (1024-dim) for semantic retrieval"
+    opendatahub.io/model-type: embedding
+    argocd.argoproj.io/sync-wave: "8"
+  labels:
+    opendatahub.io/dashboard: "true"
+spec:
+  predictor:
+    model:
+      modelFormat:
+        name: huggingface
+      runtime: text-embeddings-inference
+      storage:
+        key: minio
+        path: bge-m3
+      args:
+        - --model-id=/mnt/models
+        - --max-batch-tokens=16384
+      resources:
+        requests:
+          cpu: "4"
+          memory: "4Gi"
+        limits:
+          cpu: "6"
+          memory: "6Gi"
+    maxReplicas: 1
+    minReplicas: 1
+    timeout: 300
+---
+# Bypass Service — preserves the orchestrator's existing URL
+# (bge-m3-embedding.rag-models.svc:8080)
+apiVersion: v1
+kind: Service
+metadata:
+  name: bge-m3-embedding
+  namespace: rag-models
+  annotations:
+    argocd.argoproj.io/sync-wave: "8"
+spec:
+  selector:
+    serving.kserve.io/inferenceservice: bge-m3
+  ports:
+    - port: 8080
+      targetPort: 8080

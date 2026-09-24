@@ -1,0 +1,83 @@
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: download-bge-reranker
+  namespace: rag-models
+  annotations:
+    argocd.argoproj.io/sync-wave: "7"
+spec:
+  template:
+    spec:
+      containers:
+        - name: download
+          image: python:3.11-slim
+          command: ["bash", "-c"]
+          args:
+            - |
+              pip install -q --user huggingface_hub minio
+              export PATH="/tmp/.local/bin:$PATH"
+              python3 << 'PYEOF'
+              import os
+              from huggingface_hub import snapshot_download
+              from minio import Minio
+
+              local_dir = snapshot_download(
+                  os.environ['REPO_ID'],
+                  local_dir='/tmp/model',
+                  local_dir_use_symlinks=False
+              )
+
+              client = Minio(
+                  os.environ['MINIO_ENDPOINT'],
+                  access_key=os.environ['MINIO_ACCESS_KEY'],
+                  secret_key=os.environ['MINIO_SECRET_KEY'],
+                  secure=False
+              )
+              bucket = 'models'
+              if not client.bucket_exists(bucket):
+                  client.make_bucket(bucket)
+
+              prefix = os.environ['MODEL_PREFIX']
+              for root, dirs, files in os.walk(local_dir):
+                  for f in files:
+                      if f.startswith('.'):
+                          continue
+                      local_path = os.path.join(root, f)
+                      rel_path = os.path.relpath(local_path, local_dir)
+                      minio_path = f'{prefix}/{rel_path}'
+                      size = os.path.getsize(local_path)
+                      print(f'Uploading: {minio_path} ({size / 1e6:.1f} MB)')
+                      client.fput_object(bucket, minio_path, local_path)
+
+              print(f'Done: s3://{bucket}/{prefix}/')
+              PYEOF
+          env:
+            - name: REPO_ID
+              value: "BAAI/bge-reranker-v2-m3"
+            - name: MODEL_PREFIX
+              value: "bge-reranker"
+            - name: HOME
+              value: /tmp
+            - name: HF_HOME
+              value: /tmp/hf_cache
+            - name: MINIO_ENDPOINT
+              valueFrom:
+                secretKeyRef:
+                  name: minio-models
+                  key: MINIO_ENDPOINT
+            - name: MINIO_ACCESS_KEY
+              valueFrom:
+                secretKeyRef:
+                  name: minio-models
+                  key: MINIO_ACCESS_KEY
+            - name: MINIO_SECRET_KEY
+              valueFrom:
+                secretKeyRef:
+                  name: minio-models
+                  key: MINIO_SECRET_KEY
+          resources:
+            requests:
+              cpu: "2"
+              memory: "4Gi"
+      restartPolicy: Never
+  backoffLimit: 3

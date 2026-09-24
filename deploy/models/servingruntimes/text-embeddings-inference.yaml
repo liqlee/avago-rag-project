@@ -1,0 +1,54 @@
+apiVersion: serving.kserve.io/v1alpha1
+kind: ServingRuntime
+metadata:
+  name: text-embeddings-inference
+  namespace: rag-models
+  annotations:
+    opendatahub.io/template-name: text-embeddings-inference
+    opendatahub.io/template-display-name: "HuggingFace TEI"
+    openshift.io/display-name: "Text Embeddings Inference"
+    openshift.io/description: "HuggingFace Text Embeddings Inference for embedding and reranking models on CPU"
+  labels:
+    opendatahub.io/dashboard: "true"
+spec:
+  supportedModelFormats:
+    - name: huggingface
+      version: "1"
+      autoSelect: true
+  protocolVersions:
+    - v2
+  multiModel: false
+  containers:
+    - name: kserve-container
+      image: ghcr.io/huggingface/text-embeddings-inference:cpu-1.6
+      args:
+        - --port=8080
+      ports:
+        - containerPort: 8080
+          protocol: TCP
+      env:
+        - name: HF_HOME
+          value: /tmp/hf-cache
+      volumeMounts:
+        - name: model-cache
+          mountPath: /data
+        - name: tmp
+          mountPath: /tmp
+      readinessProbe:
+        httpGet:
+          path: /health
+          port: 8080
+        initialDelaySeconds: 60
+        periodSeconds: 10
+      livenessProbe:
+        httpGet:
+          path: /health
+          port: 8080
+        initialDelaySeconds: 90
+        periodSeconds: 30
+        failureThreshold: 5
+  volumes:
+    - name: model-cache
+      emptyDir: {}
+    - name: tmp
+      emptyDir: {}

@@ -1,0 +1,51 @@
+apiVersion: serving.kserve.io/v1beta1
+kind: InferenceService
+metadata:
+  name: bge-reranker
+  namespace: rag-models
+  annotations:
+    serving.kserve.io/deploymentMode: RawDeployment
+    security.opendatahub.io/enable-auth: "false"
+    openshift.io/display-name: "BGE Reranker v2-m3"
+    openshift.io/description: "BAAI BGE-reranker-v2-m3 cross-encoder for re-scoring retrieval candidates"
+    opendatahub.io/model-type: reranker
+    argocd.argoproj.io/sync-wave: "8"
+  labels:
+    opendatahub.io/dashboard: "true"
+spec:
+  predictor:
+    model:
+      modelFormat:
+        name: huggingface
+      runtime: text-embeddings-inference
+      storage:
+        key: minio
+        path: bge-reranker
+      args:
+        - --model-id=/mnt/models
+      resources:
+        requests:
+          cpu: "4"
+          memory: "4Gi"
+        limits:
+          cpu: "6"
+          memory: "6Gi"
+    maxReplicas: 1
+    minReplicas: 1
+    timeout: 300
+---
+# Bypass Service — preserves the orchestrator's existing URL
+# (bge-reranker.rag-models.svc:8080)
+apiVersion: v1
+kind: Service
+metadata:
+  name: bge-reranker
+  namespace: rag-models
+  annotations:
+    argocd.argoproj.io/sync-wave: "8"
+spec:
+  selector:
+    serving.kserve.io/inferenceservice: bge-reranker
+  ports:
+    - port: 8080
+      targetPort: 8080

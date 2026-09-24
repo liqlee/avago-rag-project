@@ -1,0 +1,72 @@
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: ingest-manuals
+  namespace: rag-app
+  annotations:
+    argocd.argoproj.io/sync-wave: "9"
+spec:
+  template:
+    spec:
+      containers:
+        - name: ingest
+          image: image-registry.openshift-image-registry.svc:5000/rag-app/rag-ingestion:latest
+          env:
+            - name: HOME
+              value: /tmp
+            - name: MINIO_ENDPOINT
+              value: "minio.rag-app.svc:9000"
+            - name: MINIO_ACCESS_KEY
+              valueFrom:
+                secretKeyRef:
+                  name: minio-secret
+                  key: MINIO_ROOT_USER
+            - name: MINIO_SECRET_KEY
+              valueFrom:
+                secretKeyRef:
+                  name: minio-secret
+                  key: MINIO_ROOT_PASSWORD
+            - name: EMBEDDING_URL
+              value: "http://bge-m3-embedding.rag-models.svc:8080"
+            - name: PG_HOST
+              valueFrom:
+                secretKeyRef:
+                  name: rag-db-pguser-postgres
+                  key: host
+            - name: PG_PORT
+              valueFrom:
+                secretKeyRef:
+                  name: rag-db-pguser-postgres
+                  key: port
+            - name: PG_USER
+              valueFrom:
+                secretKeyRef:
+                  name: rag-db-pguser-postgres
+                  key: user
+            - name: PG_PASSWORD
+              valueFrom:
+                secretKeyRef:
+                  name: rag-db-pguser-postgres
+                  key: password
+            - name: PG_DBNAME
+              valueFrom:
+                secretKeyRef:
+                  name: rag-db-pguser-postgres
+                  key: dbname
+            - name: EQUIPMENT_ID
+              value: ""
+            - name: EQUIPMENT_NAME
+              value: ""
+            - name: FORCE_REPROCESS
+              value: "true"
+            - name: EMBEDDING_BATCH_SIZE
+              value: "4"
+          resources:
+            requests:
+              cpu: "4"
+              memory: "16Gi"
+            limits:
+              cpu: "8"
+              memory: "24Gi"
+      restartPolicy: Never
+  backoffLimit: 2

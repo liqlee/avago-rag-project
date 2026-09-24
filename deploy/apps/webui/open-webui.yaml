@@ -1,0 +1,99 @@
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: webui-pvc
+  namespace: rag-app
+  annotations:
+    argocd.argoproj.io/sync-wave: "10"
+spec:
+  accessModes:
+    - ReadWriteOnce
+  resources:
+    requests:
+      storage: 10Gi
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: open-webui
+  namespace: rag-app
+  annotations:
+    argocd.argoproj.io/sync-wave: "10"
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: open-webui
+  template:
+    metadata:
+      labels:
+        app: open-webui
+    spec:
+      containers:
+        - name: webui
+          image: ghcr.io/open-webui/open-webui:main
+          ports:
+            - containerPort: 8080
+          env:
+            - name: HOME
+              value: /tmp
+            - name: OPENAI_API_BASE_URL
+              value: "http://rag-orchestrator.rag-app.svc:8000/v1"
+            - name: OPENAI_API_KEY
+              value: "not-needed"
+            - name: WEBUI_AUTH
+              value: "true"
+            - name: ENABLE_SIGNUP
+              value: "true"
+            - name: WEBUI_SECRET_KEY
+              value: "rag-poc-secret-key-2026"
+          volumeMounts:
+            - name: data
+              mountPath: /app/backend/data
+          resources:
+            requests:
+              cpu: "1"
+              memory: "2Gi"
+            limits:
+              cpu: "2"
+              memory: "4Gi"
+          readinessProbe:
+            httpGet:
+              path: /
+              port: 8080
+            initialDelaySeconds: 15
+            periodSeconds: 10
+      volumes:
+        - name: data
+          persistentVolumeClaim:
+            claimName: webui-pvc
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: open-webui
+  namespace: rag-app
+  annotations:
+    argocd.argoproj.io/sync-wave: "10"
+spec:
+  selector:
+    app: open-webui
+  ports:
+    - port: 8080
+      targetPort: 8080
+---
+apiVersion: route.openshift.io/v1
+kind: Route
+metadata:
+  name: open-webui
+  namespace: rag-app
+  annotations:
+    argocd.argoproj.io/sync-wave: "10"
+spec:
+  to:
+    kind: Service
+    name: open-webui
+  port:
+    targetPort: 8080
+  tls:
+    termination: edge

@@ -1,0 +1,5 @@
+docling>=2.5.0
+minio>=7.2.0
+httpx>=0.27.0
+psycopg2-binary>=2.9.0
+PyMuPDF>=1.24.0

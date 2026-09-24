@@ -1,0 +1,50 @@
+apiVersion: postgres-operator.crunchydata.com/v1beta1
+kind: PostgresCluster
+metadata:
+  name: rag-db
+  namespace: rag-app
+  annotations:
+    argocd.argoproj.io/sync-wave: "5"
+spec:
+  postgresVersion: 16
+  instances:
+    - name: pgha1
+      replicas: 1
+      resources:
+        requests:
+          cpu: "4"
+          memory: "8Gi"
+        limits:
+          cpu: "8"
+          memory: "16Gi"
+      dataVolumeClaimSpec:
+        accessModes:
+          - ReadWriteOnce
+        resources:
+          requests:
+            storage: 50Gi
+  backups:
+    pgbackrest:
+      repos:
+        - name: repo1
+          volume:
+            volumeClaimSpec:
+              accessModes:
+                - ReadWriteOnce
+              resources:
+                requests:
+                  storage: 20Gi
+  users:
+    - name: postgres
+      databases:
+        - rag-db
+      options: "SUPERUSER"
+  patroni:
+    dynamicConfiguration:
+      postgresql:
+        parameters:
+          shared_preload_libraries: vector
+          shared_buffers: "2GB"
+          effective_cache_size: "6GB"
+          work_mem: "64MB"
+          max_connections: "100"

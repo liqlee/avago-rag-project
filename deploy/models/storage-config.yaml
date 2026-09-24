@@ -1,0 +1,31 @@
+apiVersion: v1
+kind: Secret
+metadata:
+  name: storage-config
+  namespace: rag-models
+  annotations:
+    argocd.argoproj.io/sync-wave: "6"
+type: Opaque
+stringData:
+  minio: |
+    {
+      "type": "s3",
+      "access_key_id": "CHANGEME",
+      "secret_access_key": "CHANGEME",
+      "endpoint_url": "http://minio.rag-app.svc:9000",
+      "bucket": "models",
+      "region": "us-east-1"
+    }
+---
+apiVersion: v1
+kind: Secret
+metadata:
+  name: minio-models
+  namespace: rag-models
+  annotations:
+    argocd.argoproj.io/sync-wave: "6"
+type: Opaque
+stringData:
+  MINIO_ENDPOINT: "minio.rag-app.svc:9000"
+  MINIO_ACCESS_KEY: "CHANGEME"
+  MINIO_SECRET_KEY: "CHANGEME"

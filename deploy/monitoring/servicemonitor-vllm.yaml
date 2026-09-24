@@ -1,0 +1,15 @@
+apiVersion: monitoring.coreos.com/v1
+kind: ServiceMonitor
+metadata:
+  name: vllm-monitor
+  namespace: rag-models
+  annotations:
+    argocd.argoproj.io/sync-wave: "11"
+spec:
+  selector:
+    matchLabels:
+      app: vllm-qwen
+  endpoints:
+    - port: "8000"
+      path: /metrics
+      interval: 15s

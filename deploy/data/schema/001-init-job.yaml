@@ -1,0 +1,133 @@
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: init-schema
+  namespace: rag-app
+  annotations:
+    argocd.argoproj.io/sync-wave: "6"
+spec:
+  template:
+    spec:
+      containers:
+        - name: init
+          image: postgres:16-alpine
+          command: ["sh", "-c"]
+          args:
+            - |
+              until pg_isready -h "$PGHOST" -p "$PGPORT" -U "$PGUSER"; do
+                echo "Waiting for Postgres..."
+                sleep 5
+              done
+              echo "Postgres is ready. Applying schema..."
+              PGPASSWORD="$PGPASSWORD" psql -h "$PGHOST" -p "$PGPORT" -U "$PGUSER" -d "$PGDATABASE" << 'SQL'
+              CREATE EXTENSION IF NOT EXISTS vector;
+
+              CREATE TABLE IF NOT EXISTS chunks (
+                  id TEXT PRIMARY KEY,
+                  text TEXT NOT NULL,
+                  chunk_type TEXT NOT NULL CHECK (chunk_type IN ('procedure', 'table', 'warning', 'reference')),
+                  metadata JSONB NOT NULL DEFAULT '{}',
+                  dense_vector vector(1024),
+                  sparse_vector JSONB,
+                  created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+                  updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+              );
+
+              CREATE INDEX IF NOT EXISTS idx_chunks_dense
+                  ON chunks USING hnsw (dense_vector vector_cosine_ops)
+                  WITH (m = 16, ef_construction = 200);
+
+              CREATE INDEX IF NOT EXISTS idx_chunks_metadata
+                  ON chunks USING gin (metadata);
+
+              CREATE INDEX IF NOT EXISTS idx_chunks_type
+                  ON chunks (chunk_type);
+
+              CREATE INDEX IF NOT EXISTS idx_chunks_equipment
+                  ON chunks ((metadata->>'equipment_id'));
+
+              CREATE TABLE IF NOT EXISTS conversations (
+                  id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+                  user_id TEXT NOT NULL,
+                  title TEXT,
+                  created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+                  updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+              );
+
+              CREATE INDEX IF NOT EXISTS idx_conversations_user
+                  ON conversations (user_id);
+
+              CREATE TABLE IF NOT EXISTS messages (
+                  id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+                  conversation_id UUID NOT NULL REFERENCES conversations(id) ON DELETE CASCADE,
+                  role TEXT NOT NULL CHECK (role IN ('user', 'assistant', 'system')),
+                  content TEXT NOT NULL,
+                  chunks_used JSONB,
+                  guardian_result JSONB,
+                  latency_ms INTEGER,
+                  created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+              );
+
+              CREATE INDEX IF NOT EXISTS idx_messages_conversation
+                  ON messages (conversation_id, created_at);
+
+              CREATE TABLE IF NOT EXISTS feedback (
+                  id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+                  message_id UUID NOT NULL REFERENCES messages(id) ON DELETE CASCADE,
+                  user_id TEXT NOT NULL,
+                  rating TEXT NOT NULL CHECK (rating IN ('positive', 'negative')),
+                  comment TEXT,
+                  created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+              );
+
+              CREATE INDEX IF NOT EXISTS idx_feedback_rating
+                  ON feedback (rating, created_at);
+
+              CREATE TABLE IF NOT EXISTS ingestion_logs (
+                  id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+                  file_name TEXT NOT NULL,
+                  file_path TEXT NOT NULL,
+                  status TEXT NOT NULL CHECK (status IN ('pending', 'processing', 'completed', 'failed')),
+                  chunks_created INTEGER DEFAULT 0,
+                  error_message TEXT,
+                  started_at TIMESTAMPTZ,
+                  completed_at TIMESTAMPTZ,
+                  created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+              );
+
+              CREATE INDEX IF NOT EXISTS idx_ingestion_status
+                  ON ingestion_logs (status);
+              SQL
+              echo "Schema applied successfully."
+          env:
+            - name: PGHOST
+              valueFrom:
+                secretKeyRef:
+                  name: rag-db-pguser-postgres
+                  key: host
+            - name: PGPORT
+              valueFrom:
+                secretKeyRef:
+                  name: rag-db-pguser-postgres
+                  key: port
+            - name: PGUSER
+              valueFrom:
+                secretKeyRef:
+                  name: rag-db-pguser-postgres
+                  key: user
+            - name: PGPASSWORD
+              valueFrom:
+                secretKeyRef:
+                  name: rag-db-pguser-postgres
+                  key: password
+            - name: PGDATABASE
+              valueFrom:
+                secretKeyRef:
+                  name: rag-db-pguser-postgres
+                  key: dbname
+          resources:
+            requests:
+              cpu: "100m"
+              memory: "128Mi"
+      restartPolicy: Never
+  backoffLimit: 10

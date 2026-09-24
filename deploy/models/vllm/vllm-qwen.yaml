@@ -1,0 +1,59 @@
+apiVersion: serving.kserve.io/v1beta1
+kind: InferenceService
+metadata:
+  name: qwen-14b-awq
+  namespace: rag-models
+  annotations:
+    serving.kserve.io/deploymentMode: RawDeployment
+    security.opendatahub.io/enable-auth: "false"
+    openshift.io/display-name: "Qwen 2.5 14B Instruct (AWQ)"
+    openshift.io/description: "Qwen 2.5 14B Instruct with AWQ 4-bit quantization for RAG answer generation"
+    opendatahub.io/model-type: text-generation
+    argocd.argoproj.io/sync-wave: "8"
+  labels:
+    opendatahub.io/dashboard: "true"
+spec:
+  predictor:
+    model:
+      modelFormat:
+        name: vllm
+      runtime: vllm-gpu
+      storage:
+        key: minio
+        path: qwen-14b-awq
+      args:
+        - --served-model-name=qwen-14b
+        - --quantization=awq
+        - --dtype=auto
+        - --max-model-len=8192
+        - --gpu-memory-utilization=0.9
+      resources:
+        requests:
+          cpu: "4"
+          memory: "16Gi"
+          nvidia.com/gpu: "1"
+        limits:
+          cpu: "8"
+          memory: "32Gi"
+          nvidia.com/gpu: "1"
+    maxReplicas: 1
+    minReplicas: 1
+    deploymentStrategy:
+      type: Recreate
+    timeout: 300
+---
+# Bypass Service — preserves the orchestrator's existing URL
+# (vllm-qwen.rag-models.svc:8000)
+apiVersion: v1
+kind: Service
+metadata:
+  name: vllm-qwen
+  namespace: rag-models
+  annotations:
+    argocd.argoproj.io/sync-wave: "8"
+spec:
+  selector:
+    serving.kserve.io/inferenceservice: qwen-14b-awq
+  ports:
+    - port: 8000
+      targetPort: 8080

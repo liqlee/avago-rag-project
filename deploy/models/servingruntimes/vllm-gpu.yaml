@@ -1,0 +1,50 @@
+apiVersion: serving.kserve.io/v1alpha1
+kind: ServingRuntime
+metadata:
+  name: vllm-gpu
+  namespace: rag-models
+  annotations:
+    opendatahub.io/template-name: vllm-gpu
+    opendatahub.io/template-display-name: "vLLM GPU"
+    openshift.io/display-name: "vLLM GPU Runtime"
+    openshift.io/description: "vLLM inference engine with OpenAI-compatible API for GPU-accelerated LLM serving"
+  labels:
+    opendatahub.io/dashboard: "true"
+spec:
+  supportedModelFormats:
+    - name: vllm
+      version: "1"
+      autoSelect: true
+  protocolVersions:
+    - v2
+  multiModel: false
+  containers:
+    - name: kserve-container
+      image: vllm/vllm-openai:latest
+      args:
+        - --model=/mnt/models
+        - --port=8080
+        - --host=0.0.0.0
+      ports:
+        - containerPort: 8080
+          protocol: TCP
+      env:
+        - name: HOME
+          value: /tmp
+        - name: HF_HOME
+          value: /tmp/hf_home
+        - name: VLLM_CACHE_ROOT
+          value: /tmp/vllm_cache
+      readinessProbe:
+        httpGet:
+          path: /health
+          port: 8080
+        initialDelaySeconds: 120
+        periodSeconds: 10
+      livenessProbe:
+        httpGet:
+          path: /health
+          port: 8080
+        initialDelaySeconds: 180
+        periodSeconds: 30
+        failureThreshold: 5

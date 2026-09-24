@@ -1,0 +1,105 @@
+apiVersion: tekton.dev/v1
+kind: Pipeline
+metadata:
+  name: rag-build
+  namespace: rag-pipelines
+spec:
+  params:
+    - name: REPO_URL
+      type: string
+      description: Git repository URL
+    - name: REVISION
+      type: string
+      description: Git revision (branch, tag, or commit SHA)
+      default: main
+    - name: IMAGE
+      type: string
+      description: Full image reference to build and push
+    - name: CONTEXT_DIR
+      type: string
+      description: Path to the build context relative to repo root
+    - name: CONTAINERFILE
+      type: string
+      description: Name of the Containerfile within the context directory
+      default: Containerfile
+    - name: DEPLOYMENT_NAME
+      type: string
+      description: Deployment to restart after build (empty to skip)
+      default: ""
+    - name: DEPLOYMENT_NAMESPACE
+      type: string
+      description: Namespace of the deployment to restart
+      default: rag-app
+  workspaces:
+    - name: source
+  tasks:
+    - name: git-clone
+      taskRef:
+        resolver: cluster
+        params:
+          - name: kind
+            value: task
+          - name: name
+            value: git-clone
+          - name: namespace
+            value: openshift-pipelines
+      params:
+        - name: url
+          value: $(params.REPO_URL)
+        - name: revision
+          value: $(params.REVISION)
+      workspaces:
+        - name: output
+          workspace: source
+
+    - name: build-push
+      runAfter:
+        - git-clone
+      taskRef:
+        resolver: cluster
+        params:
+          - name: kind
+            value: task
+          - name: name
+            value: buildah
+          - name: namespace
+            value: openshift-pipelines
+      params:
+        - name: IMAGE
+          value: $(params.IMAGE)
+        - name: CONTEXT
+          value: $(params.CONTEXT_DIR)
+        - name: DOCKERFILE
+          value: $(params.CONTEXT_DIR)/$(params.CONTAINERFILE)
+        - name: TLSVERIFY
+          value: "false"
+        - name: BUILD_EXTRA_ARGS
+          value: "--pull=newer"
+      workspaces:
+        - name: source
+          workspace: source
+
+    - name: rollout-restart
+      runAfter:
+        - build-push
+      when:
+        - input: $(params.DEPLOYMENT_NAME)
+          operator: notin
+          values: [""]
+      taskSpec:
+        params:
+          - name: DEPLOYMENT_NAME
+            type: string
+          - name: DEPLOYMENT_NAMESPACE
+            type: string
+        steps:
+          - name: rollout
+            image: image-registry.openshift-image-registry.svc:5000/openshift/cli:latest
+            script: |
+              oc rollout restart deployment/$(params.DEPLOYMENT_NAME) -n $(params.DEPLOYMENT_NAMESPACE)
+              oc rollout status deployment/$(params.DEPLOYMENT_NAME) -n $(params.DEPLOYMENT_NAMESPACE) --timeout=120s
+      params:
+        - name: DEPLOYMENT_NAME
+          value: $(params.DEPLOYMENT_NAME)
+        - name: DEPLOYMENT_NAMESPACE
+          value: $(params.DEPLOYMENT_NAMESPACE)

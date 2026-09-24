@@ -1,0 +1,42 @@
+# Bootstrap: apply this AFTER the GitOps operator is installed.
+#
+#   oc apply -f deploy/14-gitops/subscription.yaml
+#   # Wait ~2 min for the operator to install
+#   oc apply -f argocd-application.yaml
+#
+# Argo CD then manages everything in deploy/ via sync waves.
+# Access the Argo CD console:
+#   oc get route openshift-gitops-server -n openshift-gitops -o jsonpath='{.spec.host}'
+#   # Admin password:
+#   oc get secret openshift-gitops-cluster -n openshift-gitops -o jsonpath='{.data.admin\.password}' | base64 -d
+---
+apiVersion: argoproj.io/v1alpha1
+kind: Application
+metadata:
+  name: rag-poc
+  namespace: openshift-gitops
+spec:
+  project: default
+  source:
+    repoURL: https://github.com/CHANGEME/avago-rag-project.git
+    targetRevision: main
+    path: deploy
+    directory:
+      recurse: true
+      exclude: "{*.sh,*.sql}"
+  destination:
+    server: https://kubernetes.default.svc
+  syncPolicy:
+    automated:
+      prune: true
+      selfHeal: true
+    syncOptions:
+      - CreateNamespace=true
+      - ServerSideApply=true
+      - RespectIgnoreDifferences=true
+    retry:
+      limit: 20
+      backoff:
+        duration: 30s
+        factor: 2
+        maxDuration: 10m

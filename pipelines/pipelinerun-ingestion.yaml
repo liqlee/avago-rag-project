@@ -1,0 +1,32 @@
+apiVersion: tekton.dev/v1
+kind: PipelineRun
+metadata:
+  generateName: rag-build-ingestion-
+  namespace: rag-pipelines
+spec:
+  pipelineRef:
+    name: rag-build
+  params:
+    - name: REPO_URL
+      value: https://github.com/CHANGEME/avago-rag-project.git
+    - name: REVISION
+      value: main
+    - name: IMAGE
+      value: image-registry.openshift-image-registry.svc:5000/rag-app/rag-ingestion:latest
+    - name: CONTEXT_DIR
+      value: services/ingestion
+    - name: DEPLOYMENT_NAME
+      value: ""
+    - name: DEPLOYMENT_NAMESPACE
+      value: rag-app
+  workspaces:
+    - name: source
+      volumeClaimTemplate:
+        spec:
+          accessModes:
+            - ReadWriteOnce
+          resources:
+            requests:
+              storage: 1Gi
+  taskRunTemplate:
+    serviceAccountName: pipeline

@@ -1,0 +1,159 @@
+apiVersion: triggers.tekton.dev/v1beta1
+kind: TriggerBinding
+metadata:
+  name: rag-github-push
+  namespace: rag-pipelines
+spec:
+  params:
+    - name: REPO_URL
+      value: $(body.repository.clone_url)
+    - name: REVISION
+      value: $(body.after)
+---
+apiVersion: triggers.tekton.dev/v1beta1
+kind: TriggerTemplate
+metadata:
+  name: rag-build-orchestrator
+  namespace: rag-pipelines
+spec:
+  params:
+    - name: REPO_URL
+    - name: REVISION
+  resourcetemplates:
+    - apiVersion: tekton.dev/v1
+      kind: PipelineRun
+      metadata:
+        generateName: rag-build-orchestrator-
+        namespace: rag-pipelines
+      spec:
+        pipelineRef:
+          name: rag-build
+        params:
+          - name: REPO_URL
+            value: $(tt.params.REPO_URL)
+          - name: REVISION
+            value: $(tt.params.REVISION)
+          - name: IMAGE
+            value: image-registry.openshift-image-registry.svc:5000/rag-app/rag-orchestrator:latest
+          - name: CONTEXT_DIR
+            value: services/orchestrator
+          - name: DEPLOYMENT_NAME
+            value: rag-orchestrator
+          - name: DEPLOYMENT_NAMESPACE
+            value: rag-app
+        workspaces:
+          - name: source
+            volumeClaimTemplate:
+              spec:
+                accessModes:
+                  - ReadWriteOnce
+                resources:
+                  requests:
+                    storage: 1Gi
+        taskRunTemplate:
+          serviceAccountName: pipeline
+---
+apiVersion: triggers.tekton.dev/v1beta1
+kind: TriggerTemplate
+metadata:
+  name: rag-build-ingestion
+  namespace: rag-pipelines
+spec:
+  params:
+    - name: REPO_URL
+    - name: REVISION
+  resourcetemplates:
+    - apiVersion: tekton.dev/v1
+      kind: PipelineRun
+      metadata:
+        generateName: rag-build-ingestion-
+        namespace: rag-pipelines
+      spec:
+        pipelineRef:
+          name: rag-build
+        params:
+          - name: REPO_URL
+            value: $(tt.params.REPO_URL)
+          - name: REVISION
+            value: $(tt.params.REVISION)
+          - name: IMAGE
+            value: image-registry.openshift-image-registry.svc:5000/rag-app/rag-ingestion:latest
+          - name: CONTEXT_DIR
+            value: services/ingestion
+          - name: DEPLOYMENT_NAME
+            value: ""
+          - name: DEPLOYMENT_NAMESPACE
+            value: rag-app
+        workspaces:
+          - name: source
+            volumeClaimTemplate:
+              spec:
+                accessModes:
+                  - ReadWriteOnce
+                resources:
+                  requests:
+                    storage: 1Gi
+        taskRunTemplate:
+          serviceAccountName: pipeline
+---
+apiVersion: triggers.tekton.dev/v1beta1
+kind: EventListener
+metadata:
+  name: rag-webhook
+  namespace: rag-pipelines
+spec:
+  serviceAccountName: pipeline
+  triggers:
+    - name: orchestrator-build
+      interceptors:
+        - ref:
+            name: "github"
+          params:
+            - name: "secretRef"
+              value:
+                secretName: github-webhook-secret
+                secretKey: secretToken
+            - name: "eventTypes"
+              value: ["push"]
+        - ref:
+            name: "cel"
+          params:
+            - name: "filter"
+              value: "body.ref == 'refs/heads/main'"
+      bindings:
+        - ref: rag-github-push
+      template:
+        ref: rag-build-orchestrator
+    - name: ingestion-build
+      interceptors:
+        - ref:
+            name: "github"
+          params:
+            - name: "secretRef"
+              value:
+                secretName: github-webhook-secret
+                secretKey: secretToken
+            - name: "eventTypes"
+              value: ["push"]
+        - ref:
+            name: "cel"
+          params:
+            - name: "filter"
+              value: "body.ref == 'refs/heads/main'"
+      bindings:
+        - ref: rag-github-push
+      template:
+        ref: rag-build-ingestion
+---
+apiVersion: route.openshift.io/v1
+kind: Route
+metadata:
+  name: rag-webhook
+  namespace: rag-pipelines
+spec:
+  to:
+    kind: Service
+    name: el-rag-webhook
+  tls:
+    termination: edge
+    insecureEdgeTerminationPolicy: Redirect

@@ -1,0 +1,18 @@
+FROM registry.access.redhat.com/ubi9/python-312
+
+RUN dnf install -y --nodocs \
+    mesa-libGL glib2 libgomp \
+    && dnf clean all
+
+WORKDIR /app
+
+COPY requirements.txt .
+RUN pip install --no-cache-dir -r requirements.txt
+
+RUN chmod -R 777 $(python3 -c "import os, rapidocr; print(os.path.join(os.path.dirname(rapidocr.__file__), 'models'))")
+
+COPY app/ app/
+
+USER 1001
+
+CMD ["python", "-m", "app.main"]
