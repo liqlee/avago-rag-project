@@ -18,7 +18,7 @@ metadata:
 spec:
   project: default
   source:
-    repoURL: https://github.com/CHANGEME/avago-rag-project.git
+    repoURL: https://github.com/liqlee/avago-rag-project.git
     targetRevision: main
     path: deploy
     directory:

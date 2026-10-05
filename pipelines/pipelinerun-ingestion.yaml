@@ -8,7 +8,7 @@ spec:
     name: rag-build
   params:
     - name: REPO_URL
-      value: https://github.com/CHANGEME/avago-rag-project.git
+      value: https://github.com/liqlee/avago-rag-project.git
     - name: REVISION
       value: main
     - name: IMAGE

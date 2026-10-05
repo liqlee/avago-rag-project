@@ -17,8 +17,8 @@ metadata:
   namespace: rag-app
 type: Opaque
 stringData:
-  MINIO_ROOT_USER: CHANGEME
-  MINIO_ROOT_PASSWORD: CHANGEME
+  MINIO_ROOT_USER: rag-minio-admin
+  MINIO_ROOT_PASSWORD: IJK4gek3P93mMjCzanmAnBX2rJEAOU
 ---
 apiVersion: apps/v1
 kind: Deployment

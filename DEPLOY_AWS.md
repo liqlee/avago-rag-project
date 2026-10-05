@@ -358,7 +358,7 @@ openshift-install create cluster --dir=. --log-level=info
 cd /path/to/avago-rag-project
 export KUBECONFIG=~/rag-sno/auth/kubeconfig
 
-./deploy/deploy.sh
+./scripts/deploy.sh
 ```
 
 The script performs pre-flight checks first:
@@ -366,7 +366,7 @@ The script performs pre-flight checks first:
 - Confirms cluster connectivity and node count (expects 1 for SNO)
 - Checks for GPU visibility on the node
 
-It then deploys all 21 steps sequentially with built-in wait logic between dependent steps. At the end, it prints all endpoint URLs.
+It then deploys all 22 steps sequentially with built-in wait logic between dependent steps. At the end, it prints all endpoint URLs.
 
 The sections below document what the script deploys at each step and how to verify each component.
 
@@ -376,8 +376,8 @@ The sections below document what the script deploys at each step and how to veri
 
 | Component | Manifest | Namespace |
 |-----------|----------|-----------|
-| NFD Operator + Instance | `deploy/01-gpu-operator/nfd-*.yaml` | `openshift-nfd` |
-| GPU Operator + ClusterPolicy | `deploy/01-gpu-operator/*.yaml` | `nvidia-gpu-operator` |
+| NFD Operator + Instance | `deploy/infrastructure/gpu-operator/nfd-*.yaml` | `openshift-nfd` |
+| GPU Operator + ClusterPolicy | `deploy/infrastructure/gpu-operator/*.yaml` | `nvidia-gpu-operator` |
 
 GPU drivers take **5-10 minutes** to build and load after the ClusterPolicy is created.
 
@@ -401,10 +401,10 @@ Installs Red Hat OpenShift AI and its two operator prerequisites.
 
 | Component | Manifest |
 |-----------|----------|
-| Service Mesh 2 | `deploy/02-rhoai/servicemesh-subscription.yaml` |
-| Serverless | `deploy/02-rhoai/serverless-subscription.yaml` |
-| RHOAI Operator | `deploy/02-rhoai/rhoai-subscription.yaml` |
-| DataScienceCluster | `deploy/02-rhoai/datasciencecluster.yaml` |
+| Service Mesh 2 | `deploy/infrastructure/rhoai/servicemesh-subscription.yaml` |
+| Serverless | `deploy/infrastructure/rhoai/serverless-subscription.yaml` |
+| RHOAI Operator | `deploy/infrastructure/rhoai/rhoai-subscription.yaml` |
+| DataScienceCluster | `deploy/infrastructure/rhoai/datasciencecluster.yaml` |
 
 The DataScienceCluster enables Dashboard, KServe, ModelMesh, Data Science Pipelines, and Workbenches. Disabled (not needed for this PoC): CodeFlare, Ray, TrustyAI.
 
@@ -423,14 +423,14 @@ echo "RHOAI Dashboard: https://$(oc get route rhods-dashboard -n redhat-ods-appl
 
 Creates application namespaces, PostgreSQL database with pgvector, database schema, and MinIO object storage.
 
-**Namespaces** (`deploy/02-rhoai/namespaces.yaml`):
+**Namespaces** (`deploy/infrastructure/rhoai/namespaces.yaml`):
 
 | Namespace | Purpose |
 |-----------|---------|
 | `rag-models` | AI model serving pods (vLLM, embedding, reranker, guardian) |
 | `rag-app` | Application pods (orchestrator, webui, postgres, minio) |
 
-**Crunchy Postgres** (`deploy/03-postgres/`):
+**Crunchy Postgres** (`deploy/data/postgres/`):
 
 | Setting | Value |
 |---------|-------|
@@ -444,7 +444,7 @@ Creates application namespaces, PostgreSQL database with pgvector, database sche
 | Config | `shared_buffers: 2GB`, `effective_cache_size: 6GB`, `work_mem: 64MB` |
 | Credentials secret | `rag-db-pguser-postgres` in namespace `rag-app` |
 
-**Database Schema** (`deploy/99-schema/001-init-job.yaml`):
+**Database Schema** (`deploy/data/schema/001-init-job.yaml`):
 
 The init-schema job waits for Postgres to be ready, then creates the pgvector extension and all tables:
 
@@ -456,13 +456,13 @@ The init-schema job waits for Postgres to be ready, then creates the pgvector ex
 | `feedback` | Thumbs up/down ratings per message |
 | `ingestion_logs` | Tracks PDF processing status (pending → processing → completed/failed) |
 
-**MinIO** (`deploy/04-minio/minio.yaml`):
+**MinIO** (`deploy/data/minio/minio.yaml`):
 
 | Setting | Value |
 |---------|-------|
 | Image | `quay.io/minio/minio:latest` |
 | Storage | 100 Gi PVC |
-| Console credentials | `minioadmin` / `R3dh4t123!` |
+| Console credentials | `rag-minio-admin` / `IJK4gek3P93mMjCzanmAnBX2rJEAOU` |
 | API port | 9000 |
 | Console port | 9001 |
 | Routes | `minio-api` and `minio-console` (TLS edge) |
@@ -481,37 +481,38 @@ oc get jobs -n rag-app
 oc get pods -n rag-app -l app=minio
 
 echo "MinIO Console: https://$(oc get route minio-console -n rag-app -o jsonpath='{.spec.host}')"
-# Login: minioadmin / R3dh4t123!
+# Login: rag-minio-admin / IJK4gek3P93mMjCzanmAnBX2rJEAOU
 ```
 
 **Console:** Workloads → Pods → namespace `rag-app` → rag-db and minio pods Running. Networking → Routes → `minio-console` → click URL.
 
 ### 2.5 AI Models (Steps 9-14)
 
-Creates PVCs, downloads models from Hugging Face, and deploys all AI serving components.
+Downloads all 4 models from Hugging Face to MinIO, registers ServingRuntimes, and deploys all AI serving components via KServe InferenceServices. Models are stored in MinIO and loaded by KServe's storage initializer at pod startup.
 
-**Model PVCs** (`deploy/05-models/model-pvc.yaml`):
+**Model Storage Config** (`deploy/models/storage-config.yaml`):
 
-| PVC | Size | Purpose |
-|-----|------|---------|
-| `llm-model-pvc` | 30 Gi | Qwen 2.5 14B Instruct AWQ (~9 GB) |
-| `guardian-model-pvc` | 10 Gi | Granite Guardian 3.1 8B GGUF Q4_K_M (~5 GB) |
+Creates the `storage-config` secret with MinIO S3 credentials for KServe, and the `minio-models` secret used by download jobs.
 
-**Model Downloads** (Kubernetes Jobs, `deploy/05-models/`):
+**Model Downloads** (Kubernetes Jobs, `deploy/models/downloads/`):
 
-| Model | Hugging Face Repo | Format | Size |
-|-------|-------------------|--------|------|
-| Qwen 2.5 14B Instruct AWQ | `Qwen/Qwen2.5-14B-Instruct-AWQ` | Safetensors (4-bit AWQ) | ~9 GB |
-| Granite Guardian 3.1 8B | `bartowski/granite-guardian-3.1-8B-GGUF` | GGUF Q4_K_M | ~5 GB |
+| Model | Hugging Face Repo | Format | Size | Job |
+|-------|-------------------|--------|------|-----|
+| Qwen 2.5 14B Instruct AWQ | `Qwen/Qwen2.5-14B-Instruct-AWQ` | Safetensors (4-bit AWQ) | ~9 GB | `download-qwen` |
+| Granite Guardian 3.3 8B | `ibm-granite/granite-guardian-3.3-8b-GGUF` | GGUF Q4_K_M | ~5 GB | `download-guardian` |
+| BGE-M3 | `BAAI/bge-m3` | SafeTensors | ~2 GB | `download-bge-m3` |
+| BGE-reranker-v2-m3 | `BAAI/bge-reranker-v2-m3` | SafeTensors | ~1.5 GB | `download-bge-reranker` |
 
 Monitor downloads:
 
 ```bash
-oc logs -n rag-models -f job/download-qwen      # ~15 min
-oc logs -n rag-models -f job/download-guardian   # ~10 min
+oc logs -n rag-models -f job/download-qwen        # ~15 min
+oc logs -n rag-models -f job/download-guardian     # ~10 min
+oc logs -n rag-models -f job/download-bge-m3      # ~3 min
+oc logs -n rag-models -f job/download-bge-reranker # ~2 min
 ```
 
-**BGE-M3 Embedding Service** (`deploy/06-embedding/bge-m3.yaml`):
+**BGE-M3 Embedding Service** (`deploy/models/embedding/bge-m3.yaml`):
 
 | Setting | Value |
 |---------|-------|
@@ -521,9 +522,9 @@ oc logs -n rag-models -f job/download-guardian   # ~10 min
 | Resources | 4-6 CPU, 4-6 Gi RAM |
 | Internal URL | `http://bge-m3-embedding.rag-models.svc:8080` |
 
-Downloads the model on first start (~2 GB, ~3 min).
+Model pre-downloaded to MinIO by the download job; KServe storage initializer loads it at pod startup.
 
-**BGE Reranker Service** (`deploy/07-reranker/bge-reranker.yaml`):
+**BGE Reranker Service** (`deploy/models/reranker/bge-reranker.yaml`):
 
 | Setting | Value |
 |---------|-------|
@@ -532,14 +533,14 @@ Downloads the model on first start (~2 GB, ~3 min).
 | Resources | 4-6 CPU, 4-6 Gi RAM |
 | Internal URL | `http://bge-reranker.rag-models.svc:8080` |
 
-Cross-encoder model for re-scoring retrieval candidates. Downloads on first start (~1.5 GB, ~2 min).
+Cross-encoder model for re-scoring retrieval candidates. Pre-downloaded to MinIO by the download job.
 
-**vLLM — Qwen 14B on GPU** (`deploy/09-vllm/vllm-qwen.yaml`):
+**vLLM — Qwen 14B on GPU** (`deploy/models/vllm/vllm-qwen.yaml`):
 
 | Setting | Value |
 |---------|-------|
 | Image | `vllm/vllm-openai:latest` |
-| Model path | `/mnt/models` (from `llm-model-pvc`) |
+| Model path | `/mnt/models` (loaded from MinIO by KServe storage initializer) |
 | Served model name | `qwen-14b` |
 | Quantization | AWQ (4-bit) |
 | Max context length | 8192 tokens |
@@ -550,13 +551,13 @@ Cross-encoder model for re-scoring retrieval candidates. Downloads on first star
 
 Takes **2-3 minutes** to load the model into GPU memory.
 
-**Granite Guardian — safety gate** (`deploy/08-guardian/guardian.yaml`):
+**Granite Guardian — safety gate** (`deploy/models/guardian/guardian.yaml`):
 
 | Setting | Value |
 |---------|-------|
 | Image | `ghcr.io/ggerganov/llama.cpp:full-<version>` |
 | Server binary | `llama-server` |
-| Model file | `granite-guardian-3.1-8B-Q4_K_M.gguf` |
+| Model file | `granite-guardian-3.3-8b-Q4_K_M.gguf` |
 | Context size | 4096 tokens |
 | CPU threads | 8 |
 | Resources | 8 CPU, 8-10 Gi RAM |
@@ -571,46 +572,31 @@ Verifies every answer is grounded in source documentation.
 oc get jobs -n rag-models
 # download-qwen, download-guardian should show Complete
 
-# All model deployments running
-oc get deployments -n rag-models
-# bge-m3-embedding, bge-reranker, vllm-qwen, guardian all 1/1 READY
+# All model InferenceServices ready
+oc get inferenceservice -n rag-models
+# bge-m3, bge-reranker, qwen-14b-awq, granite-guardian all show READY=True
 
 # GPU allocated to vLLM
 oc describe node $(oc get nodes -o name) | grep nvidia.com/gpu
 
-# Test vLLM inference
-oc exec -n rag-models deploy/vllm-qwen -- \
-  curl -s http://localhost:8000/v1/models
-# Should list "qwen-14b"
+# Download jobs complete
+oc get jobs -n rag-models
+# download-qwen, download-guardian, download-bge-m3, download-bge-reranker all Complete
 ```
 
-**Console:** Workloads → Deployments → namespace `rag-models` → all show 1/1 Ready. Workloads → Jobs → namespace `rag-models` → both downloads show Complete.
+**Console:** Workloads → Pods → namespace `rag-models` → all model pods Running. Workloads → Jobs → namespace `rag-models` → all 4 download jobs show Complete.
 
 ### 2.6 Application Layer (Steps 15-19)
 
-Seeds test data and deploys the application stack.
+Deploys the application stack.
 
-**Test Data** (`deploy/99-schema/002-seed-test-data.yaml`):
-
-Seeds 5 sample maintenance chunks into pgvector with real embeddings from BGE-M3:
-
-| Chunk ID | Type | Content |
-|----------|------|---------|
-| `cp400-impeller-torque` | procedure | Impeller bolt torque spec (95 Nm) with WARNING |
-| `cp400-seal-replacement` | procedure | 10-step mechanical seal replacement with CAUTION |
-| `cp400-torque-table` | table | Fastener torque specifications table (6 rows) |
-| `cp400-vibration-limits` | table | Vibration acceptance criteria with WARNING |
-| `cp400-annual-inspection` | procedure | 8-step annual inspection checklist |
-
-All chunks include full metadata: `equipment_id`, `equipment_name`, `manual_title`, `section_path`, `page_range`, `has_warnings`, `has_tables`.
-
-**RAG Orchestrator** (`deploy/12-rag-orchestrator/rag-orchestrator.yaml`):
+**RAG Orchestrator** (`deploy/apps/orchestrator/rag-orchestrator.yaml`):
 
 The custom Python service that ties everything together — query rewriting, hybrid retrieval, re-ranking, generation, and safety verification.
 
 | Setting | Value |
 |---------|-------|
-| Image | `quay.io/liqlee/rag-orchestrator:latest` |
+| Image | `image-registry.openshift-image-registry.svc:5000/rag-app/rag-orchestrator:latest` |
 | Resources | 1-2 CPU, 1-2 Gi RAM |
 | API | OpenAI-compatible (`/health`, `/v1/models`, `/v1/chat/completions`) |
 | Internal URL | `http://rag-orchestrator.rag-app.svc:8000` |
@@ -625,7 +611,7 @@ Connects to all backend services:
 | Guardian | `GUARDIAN_URL` | `http://guardian.rag-models.svc:8080` |
 | PostgreSQL | `PG_HOST`, `PG_PORT`, etc. | Via Crunchy secret `rag-db-pguser-postgres` |
 
-**Open WebUI** (`deploy/10-webui/open-webui.yaml`):
+**Open WebUI** (`deploy/apps/webui/open-webui.yaml`):
 
 | Setting | Value |
 |---------|-------|
@@ -635,13 +621,13 @@ Connects to all backend services:
 | Storage | 10 Gi PVC |
 | Resources | 1-2 CPU, 2-4 Gi RAM |
 
-**Monitoring** (`deploy/11-monitoring/servicemonitor-vllm.yaml`):
+**Monitoring** (`deploy/monitoring/servicemonitor-vllm.yaml`):
 
 Prometheus `ServiceMonitor` scraping vLLM's `/metrics` endpoint every 15 seconds. Metrics flow into OpenShift's built-in monitoring stack.
 
 **Console:** Observe → Metrics → query `vllm_*` for GPU utilization, request latency, token throughput.
 
-**Red Hat Quay** (`deploy/15-quay/`):
+**Red Hat Quay** (`deploy/infrastructure/quay/`):
 
 Private container registry for custom images (rag-orchestrator, rag-ingestion). Required for air-gapped on-prem deployments. Deployed with Clair scanning, HPA, mirror, and monitoring disabled (lightweight config for SNO).
 
@@ -651,10 +637,6 @@ Private container registry for custom images (rag-orchestrator, rag-ingestion). 
 # All application pods running
 oc get pods -n rag-app
 # rag-orchestrator, open-webui, minio, rag-db should all show Running
-
-# Seed data
-oc get jobs -n rag-app
-# seed-test-data should show Complete
 
 # Orchestrator health
 oc exec -n rag-app deploy/rag-orchestrator -- curl -s http://localhost:8000/health
@@ -696,10 +678,10 @@ oc apply -f <manifest-file>
 ## Phase 3: Validate the Deployment
 
 ```bash
-./deploy/validate.sh
+./scripts/validate.sh
 ```
 
-This runs **~25 automated checks** across all components:
+This runs **~40 automated checks** across all components:
 
 | Category | Checks |
 |----------|--------|
@@ -713,7 +695,7 @@ This runs **~25 automated checks** across all components:
 | **vLLM** | Pod running, GPU allocated, LLM inference returns response |
 | **Guardian** | Pod running, inference returns result |
 | **RAG Orchestrator** | Pod running, `/health` returns ok, `/v1/models` lists qwen-14b |
-| **Test Data** | Chunks seeded in pgvector (count > 0) |
+| **Tekton Pipelines** | Pipeline namespace, rag-build pipeline, EventListener, webhook route |
 | **Open WebUI** | Pod running, route exists, HTTPS returns 200 |
 | **Quay** | Pods running, route exists |
 | **GitOps** | GitOps pods running, Argo CD app synced (if installed) |
@@ -744,19 +726,12 @@ Makes the deployment declarative — Argo CD continuously syncs the cluster stat
 ### 4.1 Install OpenShift GitOps Operator
 
 ```bash
-oc apply -f deploy/14-gitops/subscription.yaml
+oc apply -f deploy/infrastructure/gitops/subscription.yaml
 ```
 
 Wait ~2 minutes for the operator to install.
 
 ### 4.2 Create the Argo CD Application
-
-First, edit `argocd-application.yaml` and replace `CHANGEME` with your actual Git repo URL:
-
-```yaml
-source:
-  repoURL: https://github.com/CHANGEME/avago-rag-project.git
-```
 
 Then apply:
 
@@ -796,10 +771,10 @@ Open the MinIO Console (see [Endpoints Summary](#endpoints-summary)), create a b
 ### 5.2 Run the Ingestion Pipeline
 
 ```bash
-oc apply -f deploy/13-ingestion/ingestion-job.yaml
+oc apply -f deploy/apps/ingestion/ingestion-job.yaml
 ```
 
-The ingestion job (`quay.io/liqlee/rag-ingestion:latest`):
+The ingestion job (`image-registry.openshift-image-registry.svc:5000/rag-app/rag-ingestion:latest`):
 1. Reads PDFs from MinIO object storage
 2. Processes them with Docling (OCR, layout analysis, table extraction)
 3. Chunks by document section (procedures, tables, warnings, references)
@@ -841,7 +816,7 @@ echo "OpenShift Console: $(oc whoami --show-console)"
 |---------|-------------------|
 | OpenShift Console | `kubeadmin` / `cat ~/rag-sno/auth/kubeadmin-password` |
 | Open WebUI | Create account on first visit (first user = admin) |
-| MinIO Console | `minioadmin` / `R3dh4t123!` |
+| MinIO Console | `rag-minio-admin` / `IJK4gek3P93mMjCzanmAnBX2rJEAOU` |
 | RHOAI Dashboard | Same as OpenShift (`kubeadmin`) |
 | Argo CD (if installed) | `admin` / decode from secret (see Phase 4.3) |
 
@@ -880,7 +855,7 @@ aws ec2 start-instances --instance-ids $SNO_INSTANCE
 
 ```bash
 # Delete all application resources first (prompts for confirmation)
-./deploy/teardown.sh    # Type 'DELETE' to confirm
+./scripts/teardown.sh    # Type 'DELETE' to confirm
 
 # Destroy the cluster and all AWS resources
 cd ~/rag-sno
@@ -903,7 +878,7 @@ GPU (A10G 24GB):
 └── vLLM → Qwen 2.5 14B AWQ (generation)                   4-8 CPU, 16-32 Gi, 1 GPU
 
 CPU workloads:
-├── Granite Guardian 3.1 8B GGUF (safety gate, llama.cpp)     8 CPU, 8-10 Gi
+├── Granite Guardian 3.3 8b GGUF (safety gate, llama.cpp)     8 CPU, 8-10 Gi
 ├── BGE-M3 (embedding, 1024-dim dense vectors)                4 CPU, 4 Gi
 ├── BGE-reranker-v2-m3 (cross-encoder re-ranking)             4 CPU, 4 Gi
 ├── PostgreSQL + pgvector (Crunchy, HNSW index)               4 CPU, 8 Gi
@@ -961,7 +936,7 @@ Phase 2 — Component Deployment (deploy.sh)
 [ ] GPU Operator installed, nvidia.com/gpu: 1 visible on node
 [ ] RHOAI, Service Mesh 2, Serverless operators all "Succeeded"
 [ ] PostgreSQL cluster running, schema applied, MinIO accessible
-[ ] Model downloads complete (Qwen ~9 GB, Guardian ~5 GB)
+[ ] Model downloads complete (Qwen ~9 GB, Guardian ~5 GB, BGE-M3 ~2 GB, BGE-reranker ~1.5 GB)
 [ ] vLLM running with GPU, embedding + reranker + guardian all Ready
 [ ] RAG Orchestrator running, /health returns ok
 [ ] Open WebUI accessible via Route, first user created

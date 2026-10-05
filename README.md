@@ -26,11 +26,62 @@ Experienced technicians are retiring faster than replacements can be trained. De
 │                                   └── PostgreSQL + pgvector       │
 │                                                                   │
 │   MinIO (PDF storage) ─── Ingestion Pipeline ─── BGE-M3          │
-│                           (Docling + RapidOCR)                    │
+│                           (Docling with OCR)                      │
 │                                                                   │
 │   NVIDIA GPU Operator ── Red Hat OpenShift AI ── Quay Registry   │
 └──────────────────────────────────────────────────────────────────┘
 ```
+
+### Ingestion Pipeline
+
+Triggered as an OpenShift Job after PDFs are uploaded to MinIO. Processes each PDF through an 8-step pipeline that converts scanned pages into searchable, classified, and embedded chunks:
+
+```
+MinIO (manuals/ bucket)
+    │  List PDFs, skip already-processed (ingestion_logs)
+    ▼
+1. DOWNLOAD PDF
+   Fetch from MinIO to temp directory
+    │
+    ▼
+2. EXTRACT PAGE IMAGES (PyMuPDF)
+   Render every page as PNG at 200 DPI
+    │
+    ▼
+3. UPLOAD PAGE IMAGES → MinIO (page-images/ bucket)
+   s3://page-images/{manual}/{page_0001.png, ...}
+    │
+    ▼
+4. DOCLING OCR + LAYOUT ANALYSIS
+   Scanned PDF → structured document with headings,
+   tables, lists, and reading-order text
+    │
+    ▼
+5. HIERARCHICAL CHUNKING
+   Split by document structure (Docling HierarchicalChunker)
+   Classify each chunk: procedure | table | warning | reference
+   Attach metadata: equipment_id, manual_title, section_path,
+                     page_range, original_page_images
+    │
+    ▼
+6. BGE-M3 EMBEDDING
+   Batch embed (batch size 32) → 1024-dim dense vectors
+   Auto-fallback to one-at-a-time on HTTP 413
+    │
+    ▼
+7. STORE IN PGVECTOR
+   Upsert chunks + vectors (ON CONFLICT → update)
+   HNSW index (m=16, ef_construction=200, cosine)
+    │
+    ▼
+8. TRACK IN INGESTION_LOGS
+   Status: processing → completed / failed
+   Record: file_name, chunks_created, error_message
+
+Exit code 1 if any file failed
+```
+
+**Chunk classification** uses rule-based detection: 3+ numbered steps → `procedure`, 2+ pipe-delimited rows → `table`, WARNING/CAUTION/DANGER keywords → `warning`, everything else → `reference`. Each chunk carries a section path derived from the heading hierarchy (e.g. `Chapter 3 > Maintenance > Lubrication`) and links back to the original page images in MinIO.
 
 ### RAG Pipeline
 
@@ -62,20 +113,11 @@ User Question
     ▼
 6. SAFETY GATE (Granite Guardian 3.3 8B, CPU)
    Verify every claim is grounded in source documents
-   Strip unverified claims + add disclaimer if needed
+   Flag ungrounded answers + add disclaimer if needed
     │
     ▼
 Verified answer with [Manual, Section, Page] citations
 ```
-
-### Ingestion Pipeline
-
-Triggered as an OpenShift Job after PDFs are uploaded to MinIO:
-
-1. **Docling + RapidOCR** — Converts scanned PDFs to structured text with layout analysis, table detection, and metadata extraction
-2. **Section-aware chunking** — Splits by logical boundaries (procedures, tables, warnings), never mid-sentence or mid-table
-3. **BGE-M3 embedding** — Encodes each chunk into a 1024-dim dense vector with batch processing and 413-fallback
-4. **PostgreSQL + pgvector** — Stores chunks, vectors, and metadata with HNSW indexing
 
 ## Technology Stack
 
@@ -87,7 +129,7 @@ Triggered as an OpenShift Job after PDFs are uploaded to MinIO:
 | Safety Gate | Granite Guardian 3.3 8B (GGUF Q4_K_M) | llama.cpp CPU ServingRuntime, stored in MinIO |
 | Embedding | BGE-M3 (1024-dim dense) | TEI ServingRuntime, stored in MinIO |
 | Reranker | BGE-reranker-v2-m3 | TEI ServingRuntime, stored in MinIO |
-| Document Processing | Docling + RapidOCR | IBM, scanned PDF to structured text |
+| Document Processing | Docling | IBM, scanned PDF to structured text with built-in OCR |
 | Database | Crunchy Postgres for Kubernetes + pgvector | Vector search + metadata + chat history |
 | Object Storage | MinIO | S3-compatible, stores raw PDFs and page images |
 | Frontend | Open WebUI | Chat interface with OpenAI-compatible API |
@@ -116,7 +158,7 @@ Triggered as an OpenShift Job after PDFs are uploaded to MinIO:
 │   └── ingestion/             # PDF processing pipeline
 │       ├── app/
 │       │   ├── main.py        # Entry point — scans MinIO, processes PDFs
-│       │   ├── ingest.py      # Docling + RapidOCR document processing
+│       │   ├── ingest.py      # Docling document processing with OCR
 │       │   ├── chunker.py     # Section-aware chunking with metadata
 │       │   ├── embedder.py    # BGE-M3 batch embedding with 413-fallback
 │       │   └── config.py      # MinIO, Postgres, embedding settings

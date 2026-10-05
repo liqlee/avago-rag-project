@@ -10,8 +10,8 @@ stringData:
   minio: |
     {
       "type": "s3",
-      "access_key_id": "CHANGEME",
-      "secret_access_key": "CHANGEME",
+      "access_key_id": "rag-minio-admin",
+      "secret_access_key": "IJK4gek3P93mMjCzanmAnBX2rJEAOU",
       "endpoint_url": "http://minio.rag-app.svc:9000",
       "bucket": "models",
       "region": "us-east-1"
@@ -27,5 +27,5 @@ metadata:
 type: Opaque
 stringData:
   MINIO_ENDPOINT: "minio.rag-app.svc:9000"
-  MINIO_ACCESS_KEY: "CHANGEME"
-  MINIO_SECRET_KEY: "CHANGEME"
+  MINIO_ACCESS_KEY: "rag-minio-admin"
+  MINIO_SECRET_KEY: "IJK4gek3P93mMjCzanmAnBX2rJEAOU"

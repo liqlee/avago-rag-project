@@ -56,8 +56,8 @@ echo ""
 echo "--- PostgreSQL ---"
 PG_POD=$(oc get pods -n rag-app -l postgres-operator.crunchydata.com/role=master -o name 2>/dev/null | head -1)
 check "Postgres master running" test -n "$PG_POD"
-check "pgvector extension" oc exec -n rag-app "$PG_POD" -- psql -U postgres -c "SELECT extname FROM pg_extension WHERE extname='vector';" 2>/dev/null
-check "Chunks table exists" oc exec -n rag-app "$PG_POD" -- psql -U postgres -c "SELECT count(*) FROM chunks;" 2>/dev/null
+check "pgvector extension" oc exec -n rag-app "$PG_POD" -- psql -U postgres -d rag-db -c "SELECT extname FROM pg_extension WHERE extname='vector';" 2>/dev/null
+check "Chunks table exists" oc exec -n rag-app "$PG_POD" -- psql -U postgres -d rag-db -c "SELECT count(*) FROM chunks;" 2>/dev/null
 
 # --- MinIO ---
 echo ""
@@ -165,7 +165,7 @@ fi
 echo ""
 echo "--- Tekton Pipelines ---"
 check "Pipeline namespace exists" oc get namespace rag-pipelines
-check "Pipeline rag-build exists" oc get pipeline rag-build -n rag-pipelines
+check "Pipeline rag-build exists" oc get pipelines.tekton.dev rag-build -n rag-pipelines
 check "EventListener rag-webhook exists" oc get eventlistener rag-webhook -n rag-pipelines
 check "EventListener pod running" oc get pods -n rag-pipelines -l eventlistener=rag-webhook --field-selector=status.phase=Running -o name
 check "Webhook route exists" oc get route rag-webhook -n rag-pipelines
