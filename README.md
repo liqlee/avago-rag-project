@@ -10,26 +10,43 @@ Experienced technicians are retiring faster than replacements can be trained. De
 
 ## Architecture
 
+### Ingestion (offline)
+
 ```
-┌──────────────────────────────────────────────────────────────────┐
-│                   SINGLE NODE OPENSHIFT (SNO) 4.22               │
-│                    AWS g5.16xlarge (PoC) / On-Prem               │
-│                                                                   │
-│   User ─── Open WebUI ─── RAG Orchestrator ──┬── vLLM            │
-│              (chat UI)     (LangGraph API)    │   Qwen 2.5 14B    │
-│                                   │          │   AWQ (GPU)        │
-│                                   │          │                    │
-│                                   ├── BGE-M3 Embedding (CPU)     │
-│                                   ├── BGE Reranker v2-m3 (CPU)   │
-│                                   ├── Granite Guardian 3.3 (CPU) │
-│                                   │                               │
-│                                   └── PostgreSQL + pgvector       │
-│                                                                   │
-│   MinIO (PDF storage) ─── Ingestion Pipeline ─── BGE-M3          │
-│                           (Docling with OCR)                      │
-│                                                                   │
-│   NVIDIA GPU Operator ── Red Hat OpenShift AI ── Quay Registry   │
-└──────────────────────────────────────────────────────────────────┘
+┌─────────────────────────────────────────────────────────────────┐
+│                                                                 │
+│   MinIO ──── Ingestion Job ──── BGE-M3 ──── PostgreSQL          │
+│   (manuals/   (Docling OCR        (1024-dim     + pgvector      │
+│    bucket)     + chunking)          embedding)   (HNSW index)   │
+│                                                                 │
+└─────────────────────────────────────────────────────────────────┘
+  Upload PDFs → extract text → classify chunks → embed → store
+```
+
+### RAG Query (online)
+
+```
+┌─────────────────────────────────────────────────────────────────┐
+│                                                                 │
+│   User ─── Open WebUI ─── RAG Orchestrator (LangGraph)          │
+│              (chat UI)          │                                │
+│                                 ├── BGE-M3 Embedding (CPU)      │
+│                                 │     query → dense vector       │
+│                                 │                                │
+│                                 ├── PostgreSQL + pgvector        │
+│                                 │     cosine similarity → top 20 │
+│                                 │                                │
+│                                 ├── BGE Reranker v2-m3 (CPU)    │
+│                                 │     cross-encoder → top 5      │
+│                                 │                                │
+│                                 ├── Qwen 2.5 14B AWQ (GPU)      │
+│                                 │     generate cited answer      │
+│                                 │                                │
+│                                 └── Granite Guardian 3.3 (CPU)  │
+│                                       verify groundedness        │
+│                                                                 │
+└─────────────────────────────────────────────────────────────────┘
+  Question → embed → retrieve → rerank → generate → verify → answer
 ```
 
 ### Ingestion Pipeline
