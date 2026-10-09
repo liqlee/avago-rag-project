@@ -10,7 +10,7 @@ class ChatMessage(BaseModel):
 
 
 class ChatCompletionRequest(BaseModel):
-    model: str = "qwen-14b"
+    model: str = "qwen-7b"
     messages: list[ChatMessage]
     temperature: float = 0.7
     max_tokens: int = 2048
@@ -33,7 +33,7 @@ class ChatCompletionResponse(BaseModel):
     id: str = Field(default_factory=lambda: f"chatcmpl-{uuid.uuid4().hex[:8]}")
     object: str = "chat.completion"
     created: int = Field(default_factory=lambda: int(time.time()))
-    model: str = "qwen-14b"
+    model: str = "qwen-7b"
     choices: list[Choice]
     usage: Usage = Field(default_factory=Usage)
 

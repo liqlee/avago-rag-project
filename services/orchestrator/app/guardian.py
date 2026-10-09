@@ -65,6 +65,13 @@ def check_groundedness(answer: str, context: str) -> tuple[bool, str]:
         verdict = response.json()["choices"][0]["message"]["content"].strip()
         logger.info("Guardian verdict: %s", verdict[:200])
 
+        import re
+        score_match = re.search(r"<score>\s*(yes|no)\s*</score>", verdict, re.IGNORECASE)
+        if score_match:
+            # Guardian convention: "yes" = risk detected (ungrounded), "no" = no risk (grounded)
+            is_grounded = score_match.group(1).lower() == "no"
+            return (True, answer) if is_grounded else (False, answer + _DISCLAIMER_UNGROUNDED)
+
         if verdict.upper().startswith("GROUNDED"):
             return True, answer
 

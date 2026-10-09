@@ -1,13 +1,13 @@
 apiVersion: serving.kserve.io/v1beta1
 kind: InferenceService
 metadata:
-  name: qwen-14b-awq
+  name: qwen-7b
   namespace: rag-models
   annotations:
     serving.kserve.io/deploymentMode: RawDeployment
     security.opendatahub.io/enable-auth: "false"
-    openshift.io/display-name: "Qwen 2.5 14B Instruct (AWQ)"
-    openshift.io/description: "Qwen 2.5 14B Instruct with AWQ 4-bit quantization for RAG answer generation"
+    openshift.io/display-name: "Qwen 2.5 7B Instruct (GGUF Q4_K_M)"
+    openshift.io/description: "Qwen 2.5 7B Instruct with Q4_K_M quantization for RAG answer generation on GPU (CUDA)"
     opendatahub.io/model-type: text-generation
     argocd.argoproj.io/sync-wave: "8"
   labels:
@@ -16,25 +16,28 @@ spec:
   predictor:
     model:
       modelFormat:
-        name: vllm
-      runtime: vllm-gpu
+        name: gguf
+      runtime: llamacpp-gpu
       storage:
         key: minio
-        path: qwen-14b-awq
+        path: qwen-7b
       args:
-        - --served-model-name=qwen-14b
-        - --quantization=awq
-        - --dtype=auto
-        - --max-model-len=8192
-        - --gpu-memory-utilization=0.9
+        - -m
+        - /mnt/models/qwen2.5-7b-instruct-q4_k_m-00001-of-00002.gguf
+        - -c
+        - "8192"
+        - -t
+        - "4"
+        - -a
+        - qwen-7b
       resources:
         requests:
           cpu: "4"
-          memory: "16Gi"
+          memory: "4Gi"
           nvidia.com/gpu: "1"
         limits:
-          cpu: "8"
-          memory: "32Gi"
+          cpu: "4"
+          memory: "6Gi"
           nvidia.com/gpu: "1"
     maxReplicas: 1
     minReplicas: 1
@@ -53,7 +56,7 @@ metadata:
     argocd.argoproj.io/sync-wave: "8"
 spec:
   selector:
-    serving.kserve.io/inferenceservice: qwen-14b-awq
+    serving.kserve.io/inferenceservice: qwen-7b
   ports:
     - port: 8000
       targetPort: 8080

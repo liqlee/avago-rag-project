@@ -10,10 +10,10 @@ class Settings:
     PG_PORT: str = os.getenv("PG_PORT", "5432")
     PG_USER: str = os.getenv("PG_USER", "postgres")
     PG_PASSWORD: str = os.getenv("PG_PASSWORD", "")
-    PG_DBNAME: str = os.getenv("PG_DBNAME", "postgres")
+    PG_DBNAME: str = os.getenv("PG_DBNAME", "rag-db")
 
     MINIO_ENDPOINT: str = os.getenv("MINIO_ENDPOINT", "minio.rag-app.svc:9000")
-    MINIO_ACCESS_KEY: str = os.getenv("MINIO_ACCESS_KEY", "minioadmin")
+    MINIO_ACCESS_KEY: str = os.getenv("MINIO_ACCESS_KEY", "rag-minio-admin")
     MINIO_SECRET_KEY: str = os.getenv("MINIO_SECRET_KEY", "")
     MINIO_SECURE: bool = os.getenv("MINIO_SECURE", "false").lower() == "true"
 

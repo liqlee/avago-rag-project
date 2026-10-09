@@ -10,40 +10,33 @@ Two deployment paths are documented: **scripted** (`deploy.sh` — runs all step
 
 ## Phase 0: Prerequisites (Local Workstation)
 
-### 0.1 Request GPU Quota (Do This First — Takes 1-3 Business Days)
+### 0.1 Verify EC2 Quota
 
-AWS does not grant GPU instance access by default. Request quota before anything else.
-
-```
-AWS Console → Service Quotas → Amazon EC2
-Search: "Running On-Demand G and VT instances"
-Request increase to at least 64 vCPUs (for g5.16xlarge)
-```
-
-Verify your current quota:
+Verify your account has quota for a `g5.16xlarge` instance (64 vCPUs, 1x A10G GPU). GPU instances use a separate quota from standard compute.
 
 ```bash
 aws service-quotas get-service-quota \
   --service-code ec2 \
   --quota-code L-DB2E81BA \
   --query 'Quota.Value'
+# Should be >= 64 (Running On-Demand G and VT instances)
 ```
 
 ### 0.2 Choose Your EC2 Instance
 
-Everything runs on **one VM**. It needs enough CPU, RAM, and GPU to host the OpenShift control plane, all AI models, the database, and the application services.
+Everything runs on **one VM**. Decoder models (Qwen 7B, Guardian 8B) run on GPU with CUDA acceleration; encoder models (BGE-M3, reranker) run on CPU.
 
-| Instance | GPU | VRAM | vCPU | RAM | $/hr | Notes |
-|----------|-----|------|------|-----|------|-------|
-| g5.8xlarge | 1x A10G | 24 GB | 32 | 128 GB | ~$2.45 | Minimum for SNO + all workloads |
-| **g5.16xlarge** | 1x A10G | 24 GB | 64 | 256 GB | ~$4.10 | **Recommended — matches proposal spec** (64 cores, 256GB, 1 GPU) |
-| g5.12xlarge | 4x A10G | 96 GB | 48 | 192 GB | ~$5.67 | Multiple GPUs — can run 14B in FP16 on one, Guardian on another |
-| p4d.24xlarge | 8x A100 | 320 GB | 96 | 1.1 TB | ~$32.77 | Exact proposal GPU (A100) — expensive, use for final customer demo only |
+| Instance | vCPU | RAM | GPU | $/hr | Notes |
+|----------|------|-----|-----|------|-------|
+| g5.8xlarge | 32 | 128 GB | 1x A10G 24GB | ~$2.45 | Tight on CPU — no headroom for Quay or batch jobs |
+| **g5.16xlarge** | 64 | 256 GB | 1x A10G 24GB | ~$4.10 | **Recommended — matches on-prem proposal spec** |
+| g5.12xlarge | 48 | 192 GB | 4x A10G 96GB | ~$5.67 | Multi-GPU — for larger models or parallel serving |
 
-**g5.16xlarge is the closest match to the proposal's hardware spec:**
-- 64 vCPU ↔ 64 cores (2x EPYC 9354)
-- 256 GB RAM ↔ 256 GB DDR5
-- 1x A10G 24GB ↔ 1x A100 80GB (smaller VRAM — use AWQ quantized models)
+**g5.16xlarge is the recommended instance:**
+- 64 vCPU ↔ 64 cores (2x EPYC 9354) — matches on-prem proposal
+- 256 GB RAM — headroom for batch jobs and concurrent requests
+- 1x A10G 24GB GPU — both Qwen 7B (~4.5 GB VRAM) and Guardian 8B (~5 GB VRAM) via time-slicing
+- 5-10x faster LLM inference than CPU-only
 
 ### 0.3 Install CLI Tools
 
@@ -125,7 +118,7 @@ The project provides a config at `cluster/install-config.yaml` with these settin
 | Cluster name | `rag-poc` |
 | Base domain | `poc.liqlee.com` (must match your Route53 hosted zone from step 0.4) |
 | Architecture | `amd64` (explicit — prevents arm64 installer binary mismatch) |
-| Instance type | `g5.16xlarge` (64 vCPU, 256 GB RAM, 1x A10G GPU) |
+| Instance type | `g5.16xlarge` (64 vCPU, 256 GB RAM, 1x A10G 24GB GPU) |
 | Region | `us-east-2` |
 | Root volume | 500 GB gp3, 6000 IOPS |
 | Workers | 0 (SNO — single node is both master and worker) |
@@ -254,6 +247,7 @@ ${APPS_IP} minio-api-rag-app.apps.rag-poc.poc.liqlee.com
 ${APPS_IP} rhods-dashboard-redhat-ods-applications.apps.rag-poc.poc.liqlee.com
 ${APPS_IP} rag-registry-quay-quay.apps.rag-poc.poc.liqlee.com
 ${APPS_IP} openshift-gitops-server-openshift-gitops.apps.rag-poc.poc.liqlee.com
+${APPS_IP} rag-webhook-rag-pipelines.apps.rag-poc.poc.liqlee.com
 EOF
 ```
 
@@ -364,7 +358,7 @@ export KUBECONFIG=~/rag-sno/auth/kubeconfig
 The script performs pre-flight checks first:
 - Verifies `oc` CLI is installed and authenticated
 - Confirms cluster connectivity and node count (expects 1 for SNO)
-- Checks for GPU visibility on the node
+- Checks for `nvidia.com/gpu` on nodes
 
 It then deploys all 22 steps sequentially with built-in wait logic between dependent steps. At the end, it prints all endpoint URLs.
 
@@ -372,26 +366,28 @@ The sections below document what the script deploys at each step and how to veri
 
 ### 2.2 GPU Stack (Steps 1-2)
 
-**Node Feature Discovery (NFD)** detects hardware features on the node. The **NVIDIA GPU Operator** installs GPU drivers, the device plugin, DCGM exporter (metrics), and the container toolkit.
+Installs the NVIDIA GPU Operator to manage GPU drivers and device plugin on the SNO node.
 
-| Component | Manifest | Namespace |
-|-----------|----------|-----------|
-| NFD Operator + Instance | `deploy/infrastructure/gpu-operator/nfd-*.yaml` | `openshift-nfd` |
-| GPU Operator + ClusterPolicy | `deploy/infrastructure/gpu-operator/*.yaml` | `nvidia-gpu-operator` |
+| Component | Manifest |
+|-----------|----------|
+| Node Feature Discovery | `deploy/infrastructure/gpu-operator/nfd-subscription.yaml` + `nfd-instance.yaml` |
+| NVIDIA GPU Operator | `deploy/infrastructure/gpu-operator/namespace.yaml` + `operatorgroup.yaml` + `subscription.yaml` |
+| GPU time-slicing | `deploy/infrastructure/gpu-operator/device-plugin-config.yaml` |
+| ClusterPolicy | `deploy/infrastructure/gpu-operator/clusterpolicy.yaml` |
 
-GPU drivers take **5-10 minutes** to build and load after the ClusterPolicy is created.
+The device plugin ConfigMap enables **GPU time-slicing** with `replicas: 2`, advertising 2 virtual GPU slots from the single A10G. This allows both Qwen 7B and Guardian 8B to share the GPU. Total VRAM usage (~10 GB) is well within the A10G's 24 GB capacity.
+
+GPU drivers take ~5-10 minutes to install. The script continues with non-GPU steps while this completes.
 
 **Verify:**
 
 ```bash
-# All GPU pods should be Running or Completed
 oc get pods -n nvidia-gpu-operator
+# All pods should be Running
 
-# Should show nvidia.com/gpu: 1 under Allocatable
-oc describe node $(oc get nodes -o name) | grep -A3 "nvidia.com/gpu"
+oc describe nodes | grep nvidia.com/gpu
+# Should show nvidia.com/gpu: 2 (time-sliced)
 ```
-
-**Console:** Compute → Nodes → click node → Details → scroll to Allocatable → confirm `nvidia.com/gpu: 1`.
 
 ### 2.3 RHOAI Stack (Steps 3-4)
 
@@ -427,7 +423,7 @@ Creates application namespaces, PostgreSQL database with pgvector, database sche
 
 | Namespace | Purpose |
 |-----------|---------|
-| `rag-models` | AI model serving pods (vLLM, embedding, reranker, guardian) |
+| `rag-models` | AI model serving pods (LLM, embedding, reranker, guardian) |
 | `rag-app` | Application pods (orchestrator, webui, postgres, minio) |
 
 **Crunchy Postgres** (`deploy/data/postgres/`):
@@ -498,7 +494,7 @@ Creates the `storage-config` secret with MinIO S3 credentials for KServe, and th
 
 | Model | Hugging Face Repo | Format | Size | Job |
 |-------|-------------------|--------|------|-----|
-| Qwen 2.5 14B Instruct AWQ | `Qwen/Qwen2.5-14B-Instruct-AWQ` | Safetensors (4-bit AWQ) | ~9 GB | `download-qwen` |
+| Qwen 2.5 7B Instruct | `Qwen/Qwen2.5-7B-Instruct-GGUF` | GGUF Q4_K_M | ~4.7 GB | `download-qwen` |
 | Granite Guardian 3.3 8B | `ibm-granite/granite-guardian-3.3-8b-GGUF` | GGUF Q4_K_M | ~5 GB | `download-guardian` |
 | BGE-M3 | `BAAI/bge-m3` | SafeTensors | ~2 GB | `download-bge-m3` |
 | BGE-reranker-v2-m3 | `BAAI/bge-reranker-v2-m3` | SafeTensors | ~1.5 GB | `download-bge-reranker` |
@@ -506,7 +502,7 @@ Creates the `storage-config` secret with MinIO S3 credentials for KServe, and th
 Monitor downloads:
 
 ```bash
-oc logs -n rag-models -f job/download-qwen        # ~15 min
+oc logs -n rag-models -f job/download-qwen        # ~5 min
 oc logs -n rag-models -f job/download-guardian     # ~10 min
 oc logs -n rag-models -f job/download-bge-m3      # ~3 min
 oc logs -n rag-models -f job/download-bge-reranker # ~2 min
@@ -535,35 +531,35 @@ Model pre-downloaded to MinIO by the download job; KServe storage initializer lo
 
 Cross-encoder model for re-scoring retrieval candidates. Pre-downloaded to MinIO by the download job.
 
-**vLLM — Qwen 14B on GPU** (`deploy/models/vllm/vllm-qwen.yaml`):
+**Qwen 7B — answer generation on GPU** (`deploy/models/vllm/vllm-qwen.yaml`):
 
 | Setting | Value |
 |---------|-------|
-| Image | `vllm/vllm-openai:latest` |
-| Model path | `/mnt/models` (loaded from MinIO by KServe storage initializer) |
-| Served model name | `qwen-14b` |
-| Quantization | AWQ (4-bit) |
-| Max context length | 8192 tokens |
-| GPU memory utilization | 90% |
-| Resources | 4-8 CPU, 16-32 Gi RAM, 1 GPU |
+| Image | `ghcr.io/ggml-org/llama.cpp:server-cuda` |
+| Model file | `qwen2.5-7b-instruct-q4_k_m-00001-of-00002.gguf` (split GGUF, 2 parts) |
+| Served model name | `qwen-7b` |
+| Quantization | GGUF Q4_K_M |
+| Context size | 8192 tokens |
+| GPU layers | 99 (full offload via `-ngl 99`) |
+| CPU threads | 4 (tokenization only) |
+| Resources | 4 CPU, 4-6 Gi RAM, 1x GPU (~4.5 GB VRAM) |
 | Internal URL | `http://vllm-qwen.rag-models.svc:8000` |
-| Readiness probe | `/health` (initial delay 120s) |
 
-Takes **2-3 minutes** to load the model into GPU memory.
+Uses the `llamacpp-gpu` ServingRuntime with CUDA acceleration. All transformer layers offloaded to GPU for ~5-10x faster inference than CPU.
 
-**Granite Guardian — safety gate** (`deploy/models/guardian/guardian.yaml`):
+**Granite Guardian — safety gate on GPU** (`deploy/models/guardian/guardian.yaml`):
 
 | Setting | Value |
 |---------|-------|
-| Image | `ghcr.io/ggerganov/llama.cpp:full-<version>` |
-| Server binary | `llama-server` |
+| Image | `ghcr.io/ggml-org/llama.cpp:server-cuda` |
 | Model file | `granite-guardian-3.3-8b-Q4_K_M.gguf` |
 | Context size | 4096 tokens |
-| CPU threads | 8 |
-| Resources | 8 CPU, 8-10 Gi RAM |
+| GPU layers | 99 (full offload via `-ngl 99`) |
+| CPU threads | 2 (tokenization only) |
+| Resources | 2 CPU, 4-6 Gi RAM, 1x GPU (~5 GB VRAM) |
 | Internal URL | `http://guardian.rag-models.svc:8080` |
 
-Verifies every answer is grounded in source documentation.
+Verifies every answer is grounded in source documentation. Shares the A10G GPU with Qwen via time-slicing.
 
 **Verify:**
 
@@ -574,10 +570,7 @@ oc get jobs -n rag-models
 
 # All model InferenceServices ready
 oc get inferenceservice -n rag-models
-# bge-m3, bge-reranker, qwen-14b-awq, granite-guardian all show READY=True
-
-# GPU allocated to vLLM
-oc describe node $(oc get nodes -o name) | grep nvidia.com/gpu
+# bge-m3, bge-reranker, qwen-7b, granite-guardian all show READY=True
 
 # Download jobs complete
 oc get jobs -n rag-models
@@ -605,7 +598,7 @@ Connects to all backend services:
 
 | Upstream Service | Environment Variable | Internal URL |
 |-----------------|---------------------|-------------|
-| vLLM (Qwen 14B) | `VLLM_BASE_URL` | `http://vllm-qwen.rag-models.svc:8000` |
+| Qwen 7B (llama.cpp) | `VLLM_BASE_URL` | `http://vllm-qwen.rag-models.svc:8000` |
 | BGE-M3 Embedding | `EMBEDDING_URL` | `http://bge-m3-embedding.rag-models.svc:8080` |
 | BGE Reranker | `RERANKER_URL` | `http://bge-reranker.rag-models.svc:8080` |
 | Guardian | `GUARDIAN_URL` | `http://guardian.rag-models.svc:8080` |
@@ -621,11 +614,7 @@ Connects to all backend services:
 | Storage | 10 Gi PVC |
 | Resources | 1-2 CPU, 2-4 Gi RAM |
 
-**Monitoring** (`deploy/monitoring/servicemonitor-vllm.yaml`):
-
-Prometheus `ServiceMonitor` scraping vLLM's `/metrics` endpoint every 15 seconds. Metrics flow into OpenShift's built-in monitoring stack.
-
-**Console:** Observe → Metrics → query `vllm_*` for GPU utilization, request latency, token throughput.
+**Monitoring** — Step 19 (vLLM ServiceMonitor) is skipped since llama.cpp does not expose Prometheus metrics. The manifest remains at `deploy/monitoring/servicemonitor-vllm.yaml` for future use.
 
 **Red Hat Quay** (`deploy/infrastructure/quay/`):
 
@@ -648,7 +637,7 @@ echo "Open WebUI: https://$(oc get route open-webui -n rag-app -o jsonpath='{.sp
 echo "Quay: https://$(oc get route rag-registry-quay -n quay -o jsonpath='{.spec.host}')"
 ```
 
-**Console:** Networking → Routes → namespace `rag-app` → `open-webui` → click URL. First visit: create an admin account, select `qwen-14b` model, ask a maintenance question.
+**Console:** Networking → Routes → namespace `rag-app` → `open-webui` → click URL. First visit: create an admin account, select `qwen-7b` model, ask a maintenance question.
 
 ### 2.7 Troubleshooting Deployment
 
@@ -681,20 +670,20 @@ oc apply -f <manifest-file>
 ./scripts/validate.sh
 ```
 
-This runs **~40 automated checks** across all components:
+This runs **~45 automated checks** across all components:
 
 | Category | Checks |
 |----------|--------|
 | **Cluster** | OpenShift reachable, single node (SNO), node Ready |
-| **GPU** | GPU Operator pods running, `nvidia.com/gpu` on node |
+| **GPU** | GPU Operator pods running, nvidia.com/gpu on node, device-plugin-config |
 | **RHOAI** | Operator running, DataScienceCluster ready, dashboard route |
 | **PostgreSQL** | Master pod running, pgvector extension loaded, chunks table exists |
 | **MinIO** | Pod running, console route accessible |
 | **Embedding** | Pod running, returns 1024-dim vectors for test input |
 | **Reranker** | Pod running, returns relevance scores for test pairs |
-| **vLLM** | Pod running, GPU allocated, LLM inference returns response |
+| **Qwen 7B** | Pod running, LLM inference returns response |
 | **Guardian** | Pod running, inference returns result |
-| **RAG Orchestrator** | Pod running, `/health` returns ok, `/v1/models` lists qwen-14b |
+| **RAG Orchestrator** | Pod running, `/health` returns ok, `/v1/models` lists qwen-7b |
 | **Tekton Pipelines** | Pipeline namespace, rag-build pipeline, EventListener, webhook route |
 | **Open WebUI** | Pod running, route exists, HTTPS returns 200 |
 | **Quay** | Pods running, route exists |
@@ -712,9 +701,8 @@ oc get pods -A -o wide | grep -E "rag-models|rag-app" | awk '{print $1, $2, $4, 
 # Node resource usage
 oc adm top node
 
-# GPU allocation
+# Resource usage
 oc describe node $(oc get nodes -o name) | grep -A5 "Allocated resources"
-oc describe node $(oc get nodes -o name) | grep nvidia
 ```
 
 ---
@@ -736,7 +724,7 @@ Wait ~2 minutes for the operator to install.
 Then apply:
 
 ```bash
-oc apply -f argocd-application.yaml
+oc apply -f deploy/infrastructure/gitops/argocd-application.yaml
 ```
 
 The Application spec:
@@ -830,7 +818,7 @@ echo "OpenShift Console: $(oc whoami --show-console)"
 |-----------|-----:|
 | g5.16xlarge (24/7) | ~$2,952/mo |
 | ELB + Route53 + EBS | ~$150/mo |
-| **Total** | **~$3,100/mo** |
+| **Total** | **~$3,102/mo** |
 
 ### Stop/Start to Save Money
 
@@ -871,21 +859,24 @@ The teardown script deletes resources in reverse order (GitOps → Quay → apps
 
 ## Architecture Summary
 
-All components on one `g5.16xlarge` node:
+All components on one `g5.16xlarge` node (64 vCPU, 256 GB RAM, 1x A10G 24GB GPU):
 
 ```
-GPU (A10G 24GB):
-└── vLLM → Qwen 2.5 14B AWQ (generation)                   4-8 CPU, 16-32 Gi, 1 GPU
+AI models — GPU-accelerated (llama.cpp CUDA):
+├── Qwen 2.5 7B Instruct GGUF (generation)       4 CPU, 4-6 Gi + 1 GPU (~4.5 GB VRAM)
+├── Granite Guardian 3.3 8B GGUF (safety gate)    2 CPU, 4-6 Gi + 1 GPU (~5 GB VRAM)
+│   └── GPU shared via NVIDIA time-slicing (replicas: 2)
 
-CPU workloads:
-├── Granite Guardian 3.3 8b GGUF (safety gate, llama.cpp)     8 CPU, 8-10 Gi
-├── BGE-M3 (embedding, 1024-dim dense vectors)                4 CPU, 4 Gi
-├── BGE-reranker-v2-m3 (cross-encoder re-ranking)             4 CPU, 4 Gi
-├── PostgreSQL + pgvector (Crunchy, HNSW index)               4 CPU, 8 Gi
-├── RAG Orchestrator (Python API)                             1-2 CPU, 1-2 Gi
-├── Open WebUI (chat frontend)                                1-2 CPU, 2-4 Gi
-├── MinIO (S3 object storage)                                 1-2 CPU, 1-2 Gi
-└── OpenShift control plane + operators                      ~16 CPU, ~38 Gi
+AI models — CPU (TEI):
+├── BGE-M3 (embedding, 1024-dim dense vectors)    4 CPU, 4 Gi
+└── BGE-reranker-v2-m3 (cross-encoder re-ranking) 4 CPU, 4 Gi
+
+Application + data:
+├── PostgreSQL + pgvector (Crunchy, HNSW index)   4 CPU, 8 Gi
+├── RAG Orchestrator (Python API)                 1-2 CPU, 1-2 Gi
+├── Open WebUI (chat frontend)                    1-2 CPU, 2-4 Gi
+├── MinIO (S3 object storage)                     1-2 CPU, 1-2 Gi
+└── OpenShift control plane + operators          ~8 CPU, ~38 Gi
 ```
 
 ---
@@ -896,8 +887,8 @@ When presenting to the customer, bridge the AWS simulation to the on-prem deploy
 
 | AWS PoC (this guide) | On-Prem Production (proposal) | What Changes |
 |---------------------|------------------------------|-------------|
-| 1x g5.16xlarge EC2 | 1x Dell R760xa rack server | Physical server instead of VM |
-| A10G 24GB (AWQ 4-bit models) | A100 80GB (FP16 full precision) | Better answer quality — no quantization needed |
+| 1x g5.16xlarge EC2 (A10G GPU) | 1x Dell R760xa rack server | Physical server instead of VM |
+| GPU-accelerated (GGUF Q4_K_M, A10G) | GPU (A100 80GB) for FP16 full precision | Larger GPU for higher quality models |
 | RHEL CoreOS | RHEL 9 | Same OS family |
 | Single Node OpenShift | Single Node OpenShift | Same platform |
 | EBS gp3 storage | NVMe SSD | Faster local storage |
@@ -906,7 +897,7 @@ When presenting to the customer, bridge the AWS simulation to the on-prem deploy
 | MinIO (PoC object storage) | OpenShift Data Foundation (NooBaa) | Enterprise S3 with replication |
 | Self-registration (Open WebUI) | Keycloak SSO ↔ AD/LDAP | Plant credential integration |
 
-*"Everything you see in this demo — the chat interface, the cited answers, the safety verification — runs identically on a single server in your datacenter. The only difference is the on-prem hardware has a larger GPU, so the models run at full precision with even better answer quality."*
+*"Everything you see in this demo — the chat interface, the cited answers, the safety verification — runs identically on a single server in your datacenter with a GPU. Upgrading to an A100 enables larger models at full precision for even better answer quality."*
 
 ---
 
@@ -914,7 +905,7 @@ When presenting to the customer, bridge the AWS simulation to the on-prem deploy
 
 ```
 Phase 0 — Prerequisites
-[ ] AWS GPU quota approved for g5.16xlarge (64 vCPUs)
+[ ] AWS GPU quota sufficient for g5.16xlarge (64 vCPUs, Running On-Demand G and VT instances)
 [ ] AWS CLI installed and configured (us-east-2)
 [ ] OpenShift CLI (oc) installed
 [ ] OpenShift installer downloaded (amd64 binary — not arm64)
@@ -933,11 +924,11 @@ Phase 1 — SNO Install
 
 Phase 2 — Component Deployment (deploy.sh)
 [ ] deploy.sh completed without errors
-[ ] GPU Operator installed, nvidia.com/gpu: 1 visible on node
+[ ] GPU Operator installed, nvidia.com/gpu: 2 visible on node
 [ ] RHOAI, Service Mesh 2, Serverless operators all "Succeeded"
 [ ] PostgreSQL cluster running, schema applied, MinIO accessible
-[ ] Model downloads complete (Qwen ~9 GB, Guardian ~5 GB, BGE-M3 ~2 GB, BGE-reranker ~1.5 GB)
-[ ] vLLM running with GPU, embedding + reranker + guardian all Ready
+[ ] Model downloads complete (Qwen 7B ~4.7 GB, Guardian ~5 GB, BGE-M3 ~2 GB, BGE-reranker ~1.5 GB)
+[ ] All 4 models running (Qwen 7B + Guardian on GPU, BGE-M3 + BGE-reranker on CPU, all Ready)
 [ ] RAG Orchestrator running, /health returns ok
 [ ] Open WebUI accessible via Route, first user created
 [ ] Quay registry deployed (optional)

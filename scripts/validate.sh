@@ -43,6 +43,7 @@ echo ""
 echo "--- GPU ---"
 check "GPU Operator pods running" oc get pods -n nvidia-gpu-operator --field-selector=status.phase=Running -o name
 check "nvidia.com/gpu on node" bash -c "oc describe nodes | grep -q 'nvidia.com/gpu'"
+check "Device plugin config" oc get configmap device-plugin-config -n nvidia-gpu-operator
 
 # --- RHOAI ---
 echo ""
@@ -68,8 +69,9 @@ check "MinIO route" oc get route minio-console -n rag-app
 # --- Model ServingRuntimes ---
 echo ""
 echo "--- KServe ServingRuntimes ---"
-check "vLLM GPU runtime" oc get servingruntime vllm-gpu -n rag-models
-check "llama.cpp CPU runtime" oc get servingruntime llamacpp-cpu -n rag-models
+# check "vLLM GPU runtime" oc get servingruntime vllm-gpu -n rag-models
+# check "llama.cpp CPU runtime" oc get servingruntime llamacpp-cpu -n rag-models
+check "llama.cpp GPU runtime" oc get servingruntime llamacpp-gpu -n rag-models
 check "TEI runtime" oc get servingruntime text-embeddings-inference -n rag-models
 
 # --- Embedding ---
@@ -98,17 +100,16 @@ if [ -n "$RERANK_POD" ]; then
     check "Reranker returns scores" bash -c "echo '$RERANK_RESULT' | python3 -c 'import sys,json; d=json.load(sys.stdin); assert len(d)>0' 2>/dev/null"
 fi
 
-# --- vLLM ---
+# --- Qwen 7B (llama.cpp CPU) ---
 echo ""
-echo "--- vLLM Qwen 14B (InferenceService) ---"
-check "vLLM InferenceService exists" oc get inferenceservice qwen-14b-awq -n rag-models
-check "vLLM pod running" oc get pods -n rag-models -l serving.kserve.io/inferenceservice=qwen-14b-awq --field-selector=status.phase=Running -o name
-VLLM_POD=$(oc get pods -n rag-models -l serving.kserve.io/inferenceservice=qwen-14b-awq --field-selector=status.phase=Running -o name 2>/dev/null | head -1)
-if [ -n "$VLLM_POD" ]; then
-    check "GPU allocated to vLLM" bash -c "oc get $VLLM_POD -n rag-models -o jsonpath='{.spec.containers[0].resources.limits.nvidia\.com/gpu}' | grep -q '1'"
-    LLM_RESULT=$(oc exec -n rag-models "$VLLM_POD" -- curl -s http://localhost:8080/v1/chat/completions \
+echo "--- Qwen 7B (InferenceService, llama.cpp GPU) ---"
+check "Qwen InferenceService exists" oc get inferenceservice qwen-7b -n rag-models
+check "Qwen pod running" oc get pods -n rag-models -l serving.kserve.io/inferenceservice=qwen-7b --field-selector=status.phase=Running -o name
+LLM_POD=$(oc get pods -n rag-models -l serving.kserve.io/inferenceservice=qwen-7b --field-selector=status.phase=Running -o name 2>/dev/null | head -1)
+if [ -n "$LLM_POD" ]; then
+    LLM_RESULT=$(oc exec -n rag-models "$LLM_POD" -- curl -s http://localhost:8080/v1/chat/completions \
       -H "Content-Type: application/json" \
-      -d '{"model":"qwen-14b","messages":[{"role":"user","content":"Say hello in one word."}],"max_tokens":5}' 2>/dev/null || echo "")
+      -d '{"model":"qwen-7b","messages":[{"role":"user","content":"Say hello in one word."}],"max_tokens":5}' 2>/dev/null || echo "")
     check "LLM inference works" bash -c "echo '$LLM_RESULT' | python3 -c 'import sys,json; d=json.load(sys.stdin); assert d[\"choices\"][0][\"message\"][\"content\"]' 2>/dev/null"
 fi
 
@@ -132,7 +133,7 @@ check "Orchestrator pod running" oc get pods -n rag-app -l app=rag-orchestrator 
 ORCH_HEALTH=$(oc exec -n rag-app deploy/rag-orchestrator -- curl -s http://localhost:8000/health 2>/dev/null || echo "")
 check "Orchestrator health endpoint" bash -c "echo '$ORCH_HEALTH' | grep -q 'ok'"
 ORCH_MODELS=$(oc exec -n rag-app deploy/rag-orchestrator -- curl -s http://localhost:8000/v1/models 2>/dev/null || echo "")
-check "Orchestrator serves model list" bash -c "echo '$ORCH_MODELS' | grep -q 'qwen-14b'"
+check "Orchestrator serves model list" bash -c "echo '$ORCH_MODELS' | grep -q 'qwen-7b'"
 
 # --- Open WebUI ---
 echo ""
@@ -151,14 +152,19 @@ QUAY_PODS=$(oc get pods -n quay --field-selector=status.phase=Running --no-heade
 check "Quay pods running" test "$QUAY_PODS" -gt 0
 check "Quay route" oc get route rag-registry-quay -n quay
 
-# --- GitOps (optional) ---
-echo ""
-echo "--- OpenShift GitOps ---"
-GITOPS_PODS=$(oc get pods -n openshift-gitops --field-selector=status.phase=Running --no-headers 2>/dev/null | wc -l | tr -d ' ')
-check "GitOps pods running" test "$GITOPS_PODS" -gt 0
-ARGOCD_APP=$(oc get application rag-poc -n openshift-gitops -o jsonpath='{.status.sync.status}' 2>/dev/null || echo "")
-if [ -n "$ARGOCD_APP" ]; then
-    check "Argo CD app synced" test "$ARGOCD_APP" = "Synced"
+# --- GitOps (optional — only checked if installed) ---
+if oc get namespace openshift-gitops &>/dev/null; then
+    echo ""
+    echo "--- OpenShift GitOps ---"
+    GITOPS_PODS=$(oc get pods -n openshift-gitops --field-selector=status.phase=Running --no-headers 2>/dev/null | wc -l | tr -d ' ')
+    check "GitOps pods running" test "$GITOPS_PODS" -gt 0
+    ARGOCD_APP=$(oc get application rag-poc -n openshift-gitops -o jsonpath='{.status.sync.status}' 2>/dev/null || echo "")
+    if [ -n "$ARGOCD_APP" ]; then
+        check "Argo CD app synced" test "$ARGOCD_APP" = "Synced"
+    fi
+else
+    echo ""
+    echo "--- OpenShift GitOps (skipped — not installed) ---"
 fi
 
 # --- Tekton Pipelines ---

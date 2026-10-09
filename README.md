@@ -39,10 +39,10 @@ Experienced technicians are retiring faster than replacements can be trained. De
 │                                 ├── BGE Reranker v2-m3 (CPU)    │
 │                                 │     cross-encoder → top 5      │
 │                                 │                                │
-│                                 ├── Qwen 2.5 14B AWQ (GPU)      │
+│                                 ├── Qwen 2.5 7B (GPU)           │
 │                                 │     generate cited answer      │
 │                                 │                                │
-│                                 └── Granite Guardian 3.3 (CPU)  │
+│                                 └── Granite Guardian 3.3 (GPU)  │
 │                                       verify groundedness        │
 │                                                                 │
 └─────────────────────────────────────────────────────────────────┘
@@ -108,7 +108,7 @@ The orchestrator uses a LangGraph StateGraph that streams intermediate step indi
 User Question
     │
     ▼
-1. QUERY REWRITE (Qwen 2.5 14B)
+1. QUERY REWRITE (Qwen 2.5 7B)
    Expand abbreviations, resolve equipment aliases
     │
     ▼
@@ -124,11 +124,11 @@ User Question
    Score candidates → select top 5
     │
     ▼
-5. GENERATE (Qwen 2.5 14B, GPU)
+5. GENERATE (Qwen 2.5 7B, GPU)
    System prompt + context + query → cited answer
     │
     ▼
-6. SAFETY GATE (Granite Guardian 3.3 8B, CPU)
+6. SAFETY GATE (Granite Guardian 3.3 8B, GPU)
    Verify every claim is grounded in source documents
    Flag ungrounded answers + add disclaimer if needed
     │
@@ -142,8 +142,8 @@ Verified answer with [Manual, Section, Page] citations
 |-------|-----------|-------|
 | Platform | OpenShift 4.22 (SNO) | Single Node OpenShift on RHEL |
 | AI/ML | Red Hat OpenShift AI | KServe InferenceService + ServingRuntime CRs |
-| LLM | Qwen 2.5 14B Instruct (AWQ 4-bit) | vLLM GPU ServingRuntime, stored in MinIO |
-| Safety Gate | Granite Guardian 3.3 8B (GGUF Q4_K_M) | llama.cpp CPU ServingRuntime, stored in MinIO |
+| LLM | Qwen 2.5 7B Instruct (GGUF Q4_K_M) | llama.cpp GPU (CUDA) ServingRuntime, stored in MinIO |
+| Safety Gate | Granite Guardian 3.3 8B (GGUF Q4_K_M) | llama.cpp GPU (CUDA) ServingRuntime, stored in MinIO |
 | Embedding | BGE-M3 (1024-dim dense) | TEI ServingRuntime, stored in MinIO |
 | Reranker | BGE-reranker-v2-m3 | TEI ServingRuntime, stored in MinIO |
 | Document Processing | Docling | IBM, scanned PDF to structured text with built-in OCR |
@@ -165,7 +165,7 @@ Verified answer with [Manual, Section, Page] citations
 │   │   ├── app/
 │   │   │   ├── main.py        # OpenAI-compatible API with SSE streaming
 │   │   │   ├── graph.py       # LangGraph StateGraph definition
-│   │   │   ├── generator.py   # Query rewrite + answer generation (vLLM)
+│   │   │   ├── generator.py   # Query rewrite + answer generation (llama.cpp)
 │   │   │   ├── guardian.py    # Groundedness verification (Granite Guardian)
 │   │   │   ├── retriever.py   # Embedding, vector search, reranking
 │   │   │   ├── models.py      # Pydantic models (OpenAI-compatible)
@@ -202,9 +202,9 @@ Verified answer with [Manual, Section, Page] citations
 │   │   └── minio/             # MinIO deployment
 │   ├── models/
 │   │   ├── storage-config.yaml # KServe S3 storage config + MinIO credentials
-│   │   ├── servingruntimes/   # KServe ServingRuntime CRs (vllm-gpu, llamacpp-cpu, TEI)
+│   │   ├── servingruntimes/   # KServe ServingRuntime CRs (llamacpp-gpu, TEI)
 │   │   ├── downloads/         # HuggingFace → MinIO download jobs (4 models)
-│   │   ├── vllm/              # Qwen 2.5 14B AWQ InferenceService + bypass Service
+│   │   ├── vllm/              # Qwen 2.5 7B GGUF InferenceService + bypass Service (legacy dir name)
 │   │   ├── guardian/          # Granite Guardian 3.3 InferenceService + bypass Service
 │   │   ├── embedding/         # BGE-M3 InferenceService + bypass Service
 │   │   └── reranker/          # BGE-reranker InferenceService + bypass Service
@@ -212,7 +212,7 @@ Verified answer with [Manual, Section, Page] citations
 │   │   ├── orchestrator/      # RAG orchestrator deployment
 │   │   ├── webui/             # Open WebUI deployment
 │   │   └── ingestion/         # Ingestion job definition
-│   └── monitoring/            # ServiceMonitors (vLLM metrics)
+│   └── monitoring/            # ServiceMonitors (unused — llama.cpp has no Prometheus metrics)
 ├── scripts/
 │   ├── deploy.sh              # Full deployment (22 steps)
 │   ├── teardown.sh            # Remove all resources + destroy cluster
@@ -228,9 +228,9 @@ Verified answer with [Manual, Section, Page] citations
 
 ### Prerequisites
 
-- OpenShift 4.22 cluster (SNO) with a GPU node
+- OpenShift 4.22 cluster (SNO)
 - `oc` CLI authenticated to the cluster
-- For AWS PoC: g5.16xlarge instance (NVIDIA A10G 24GB GPU)
+- For AWS PoC: g5.16xlarge instance (64 vCPU, 256 GB RAM, 1x A10G 24GB GPU)
 
 ### Quick Start
 
@@ -238,7 +238,7 @@ Verified answer with [Manual, Section, Page] citations
 # 1. Set up the cluster (see DEPLOY_AWS.md for AWS-specific steps)
 export KUBECONFIG=~/rag-sno/auth/kubeconfig
 
-# 2. Deploy all components (~45 min for model downloads)
+# 2. Deploy all components (~30 min for model downloads)
 ./scripts/deploy.sh
 
 # 3. Validate everything is running
@@ -254,7 +254,7 @@ oc apply -f deploy/apps/ingestion/ingestion-job.yaml
 #    (Open WebUI URL printed by deploy.sh)
 ```
 
-The deploy script handles 22 steps in order: GPU operator, OpenShift AI, namespaces, PostgreSQL + schema init, MinIO, model storage config, model downloads (HuggingFace → MinIO), ServingRuntime registration, wait for downloads, InferenceService deployments (BGE-M3, reranker, vLLM, Guardian — each pulls from MinIO via KServe storage initializer), orchestrator build, Open WebUI, monitoring, ingestion image build, Quay registry, and Tekton CI/CD pipeline infrastructure.
+The deploy script handles 22 steps in order: NFD + GPU Operator (A10G time-slicing), OpenShift AI, namespaces, PostgreSQL + schema init, MinIO, model storage config, model downloads (HuggingFace → MinIO), ServingRuntime registration (llamacpp-gpu, TEI), wait for downloads, InferenceService deployments (BGE-M3 + reranker on CPU, Qwen 7B + Guardian on GPU via CUDA, each pulls from MinIO via KServe storage initializer), orchestrator build, Open WebUI, ingestion image build, Quay registry, and Tekton CI/CD pipeline infrastructure.
 
 ### CI/CD
 
@@ -291,23 +291,71 @@ The current implementation is a proof of concept. Key differences from a product
 
 | Aspect | PoC (Current) | Production |
 |--------|---------------|------------|
-| Infrastructure | AWS g5.16xlarge (A10G 24GB) | On-prem Dell PowerEdge R760xa (A100 80GB) |
-| Quantization | AWQ 4-bit (~9GB VRAM) | FP16 (~28GB VRAM) for higher quality |
+| Infrastructure | AWS g5.16xlarge (1x A10G GPU) | On-prem Dell PowerEdge R760xa |
+| Quantization | GGUF Q4_K_M (~4.7GB, GPU) | FP16 with A100 for higher quality |
 | Authentication | Open WebUI built-in | Keycloak SSO with Active Directory/LDAP |
 | Object Storage | MinIO | OpenShift Data Foundation (NooBaa) |
 | HA | Single Node OpenShift | 3+ node cluster with rolling updates |
-| Model Upgrade | Qwen 2.5 14B | Llama 3.3 70B (add GPUs, tensor parallelism) |
+| Model Upgrade | Qwen 2.5 7B | Llama 3.3 70B (add GPUs, tensor parallelism) |
 | Domain Tuning | None | InstructLab for plant-specific terminology |
 
 ### Production Hardware Recommendation
 
-| Component | Specification |
-|-----------|---------------|
-| Server | Dell PowerEdge R760xa (2U, 4 PCIe GPU slots) |
-| CPU | 2x AMD EPYC 9354 (64 cores total) |
-| RAM | 256 GB DDR5 |
-| GPU | 1x NVIDIA A100 80GB PCIe (expandable to 4x) |
-| Storage | 2x 480GB SSD (RAID-1 boot) + 2x 3.84TB NVMe (data) |
+Two configurations depending on model size. Both use GPU-accelerated inference with GGUF quantization.
+
+**Option A — Qwen 2.5 7B (current PoC model)**
+
+| Component | Specification | Est. Cost |
+|-----------|---------------|-----------|
+| Server | Dell PowerEdge R760 (1U or 2U) | ~$1,800 |
+| CPU | 1x AMD EPYC 9334 (32 cores) | ~$3,000 |
+| RAM | 128 GB DDR5 (4x 32GB) | ~$1,100 |
+| GPU | 1x NVIDIA L4 24GB PCIe | ~$2,500 |
+| Storage | 2x 480GB SSD (RAID-1 boot) + 2x 3.84TB NVMe (data) | ~$2,000 |
+| **Total** | | **~$10,400** |
+
+VRAM budget: Qwen 7B Q4_K_M (~4.5 GB) + Guardian 8B Q4_K_M (~5 GB) = ~10 GB of 24 GB.
+CPU budget: encoders (8) + apps (6) + platform (8) + models tokenization (6) = ~28 of 32 cores.
+
+**Option B — Qwen 2.5 14B (higher answer quality)**
+
+| Component | Specification | Est. Cost |
+|-----------|---------------|-----------|
+| Server | Dell PowerEdge R760 (1U or 2U) | ~$1,800 |
+| CPU | 1x AMD EPYC 9334 (32 cores) | ~$3,000 |
+| RAM | 128 GB DDR5 (4x 32GB) | ~$1,100 |
+| GPU | 1x NVIDIA L4 24GB PCIe | ~$2,500 |
+| Storage | 2x 480GB SSD (RAID-1 boot) + 2x 3.84TB NVMe (data) | ~$2,000 |
+| **Total** | | **~$10,400** |
+
+VRAM budget: Qwen 14B Q4_K_M (~9 GB) + Guardian 8B Q4_K_M (~5 GB) = ~14 GB of 24 GB.
+CPU budget: same as Option A — GPU handles all matrix math, CPU difference is negligible.
+
+The 14B model fits on the same hardware as 7B with GGUF Q4_K_M quantization. The VRAM increase is only ~4.5 GB (9 vs 4.5 GB), well within the L4's 24 GB. The 14B model provides better reasoning and instruction-following at the cost of ~40% slower token generation.
+
+**Option C — FP16 full precision (maximum answer quality)**
+
+| Component | Specification | Est. Cost |
+|-----------|---------------|-----------|
+| Server | Dell PowerEdge R760xa (2U) | ~$2,000 |
+| CPU | 2x AMD EPYC 9354 (64 cores total) | ~$7,500 |
+| RAM | 256 GB DDR5 | ~$2,200 |
+| GPU | 1x NVIDIA A100 80GB PCIe | ~$12,000 |
+| Storage | 2x 480GB SSD (RAID-1 boot) + 2x 3.84TB NVMe (data) | ~$2,000 |
+| **Total** | | **~$25,700** |
+
+VRAM budget: Qwen 14B FP16 (~28 GB) + Guardian 8B FP16 (~16 GB) = ~44 GB of 80 GB.
+Only justified when quantization artifacts cause measurable accuracy loss in domain-specific answers.
+
+**Summary:**
+
+| Config | Model | GPU | Total Cost | vs. Option A |
+|--------|-------|-----|-----------|--------------|
+| **A (recommended)** | Qwen 7B Q4_K_M | L4 24GB | ~$10,400 | — |
+| **B** | Qwen 14B Q4_K_M | L4 24GB | ~$10,400 | Same hardware |
+| **C** | Qwen 14B FP16 | A100 80GB | ~$25,700 | +147% |
+
+Options A and B use identical hardware — the 14B upgrade is a model download, not a hardware purchase. Start with Option A, evaluate answer quality, and upgrade to 14B if needed at zero additional cost.
 
 ## Safety
 

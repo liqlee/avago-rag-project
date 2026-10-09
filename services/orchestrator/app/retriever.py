@@ -89,7 +89,7 @@ def rerank_chunks(
             "query": query,
             "texts": [c.text for c in chunks],
         },
-        timeout=30.0,
+        timeout=120.0,
     )
     response.raise_for_status()
 

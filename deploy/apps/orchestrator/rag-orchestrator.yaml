@@ -39,7 +39,7 @@ spec:
             - name: GUARDIAN_URL
               value: "http://guardian.rag-models.svc:8080"
             - name: MODEL_NAME
-              value: "qwen-14b"
+              value: "qwen-7b"
             - name: PG_HOST
               valueFrom:
                 secretKeyRef:

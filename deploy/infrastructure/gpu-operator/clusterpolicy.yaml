@@ -13,6 +13,9 @@ spec:
     useOpenKernelModules: true
   devicePlugin:
     enabled: true
+    config:
+      name: device-plugin-config
+      default: A10G
   dcgm:
     enabled: true
   dcgmExporter:

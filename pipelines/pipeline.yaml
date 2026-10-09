@@ -44,9 +44,9 @@ spec:
           - name: namespace
             value: openshift-pipelines
       params:
-        - name: url
+        - name: URL
           value: $(params.REPO_URL)
-        - name: revision
+        - name: REVISION
           value: $(params.REVISION)
       workspaces:
         - name: output

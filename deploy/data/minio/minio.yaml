@@ -37,7 +37,7 @@ spec:
     spec:
       containers:
         - name: minio
-          image: quay.io/minio/minio:latest
+          image: image-registry.openshift-image-registry.svc:5000/rag-app/minio:latest
           command: ["minio", "server", "/data", "--console-address", ":9001"]
           envFrom:
             - secretRef:

@@ -6,6 +6,7 @@ metadata:
   annotations:
     argocd.argoproj.io/sync-wave: "3"
 spec:
+  configBundleSecret: quay-config-bundle
   components:
     - kind: clair
       managed: false
@@ -14,4 +15,6 @@ spec:
     - kind: mirror
       managed: false
     - kind: monitoring
+      managed: false
+    - kind: objectstorage
       managed: false

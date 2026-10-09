@@ -1,0 +1,46 @@
+apiVersion: serving.kserve.io/v1alpha1
+kind: ServingRuntime
+metadata:
+  name: llamacpp-gpu
+  namespace: rag-models
+  annotations:
+    opendatahub.io/template-name: llamacpp-gpu
+    opendatahub.io/template-display-name: "llama.cpp GPU"
+    openshift.io/display-name: "llama.cpp GPU Runtime"
+    openshift.io/description: "llama.cpp inference server with CUDA GPU acceleration for GGUF model serving with OpenAI-compatible API"
+  labels:
+    opendatahub.io/dashboard: "true"
+spec:
+  supportedModelFormats:
+    - name: gguf
+      version: "1"
+      autoSelect: true
+  protocolVersions:
+    - v2
+  multiModel: false
+  containers:
+    - name: kserve-container
+      image: ghcr.io/ggml-org/llama.cpp:server-cuda
+      args:
+        - --host
+        - "0.0.0.0"
+        - --port
+        - "8080"
+        - -ngl
+        - "99"
+      ports:
+        - containerPort: 8080
+          protocol: TCP
+      readinessProbe:
+        httpGet:
+          path: /health
+          port: 8080
+        initialDelaySeconds: 60
+        periodSeconds: 10
+      livenessProbe:
+        httpGet:
+          path: /health
+          port: 8080
+        initialDelaySeconds: 120
+        periodSeconds: 30
+        failureThreshold: 5

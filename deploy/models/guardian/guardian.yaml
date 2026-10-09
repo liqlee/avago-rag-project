@@ -7,7 +7,7 @@ metadata:
     serving.kserve.io/deploymentMode: RawDeployment
     security.opendatahub.io/enable-auth: "false"
     openshift.io/display-name: "Granite Guardian 3.3 8B (GGUF Q4)"
-    openshift.io/description: "IBM Granite Guardian 3.3 8B for groundedness verification and hallucination detection"
+    openshift.io/description: "IBM Granite Guardian 3.3 8B for groundedness verification and hallucination detection (GPU CUDA)"
     opendatahub.io/model-type: safety-classifier
     argocd.argoproj.io/sync-wave: "8"
   labels:
@@ -17,7 +17,7 @@ spec:
     model:
       modelFormat:
         name: gguf
-      runtime: llamacpp-cpu
+      runtime: llamacpp-gpu
       storage:
         key: minio
         path: granite-guardian
@@ -27,14 +27,16 @@ spec:
         - -c
         - "4096"
         - -t
-        - "8"
+        - "2"
       resources:
         requests:
-          cpu: "8"
-          memory: "8Gi"
+          cpu: "2"
+          memory: "4Gi"
+          nvidia.com/gpu: "1"
         limits:
-          cpu: "8"
-          memory: "10Gi"
+          cpu: "2"
+          memory: "6Gi"
+          nvidia.com/gpu: "1"
     maxReplicas: 1
     minReplicas: 1
     timeout: 300

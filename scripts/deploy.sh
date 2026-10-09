@@ -102,6 +102,7 @@ oc apply -f "$DEPLOY_DIR/infrastructure/gpu-operator/namespace.yaml"
 oc apply -f "$DEPLOY_DIR/infrastructure/gpu-operator/operatorgroup.yaml"
 oc apply -f "$DEPLOY_DIR/infrastructure/gpu-operator/subscription.yaml"
 wait_for_operator "nvidia-gpu-operator" "NVIDIA GPU Operator" 180
+oc apply -f "$DEPLOY_DIR/infrastructure/gpu-operator/device-plugin-config.yaml"
 oc apply -f "$DEPLOY_DIR/infrastructure/gpu-operator/clusterpolicy.yaml"
 warn "GPU drivers installing (~5-10 min). Continuing with non-GPU steps..."
 
@@ -142,6 +143,8 @@ info "Database schema applied."
 
 echo ""
 info "=== Step 8: MinIO (object storage) ==="
+info "Building MinIO image from official binary (bypasses registry auth)..."
+build_image "minio" "$DEPLOY_DIR/data/minio" "rag-app"
 oc apply -f "$DEPLOY_DIR/data/minio/minio.yaml"
 wait_for_pods "rag-app" "app=minio" 120
 
@@ -157,12 +160,12 @@ oc apply -f "$DEPLOY_DIR/models/downloads/download-guardian-job.yaml"
 oc apply -f "$DEPLOY_DIR/models/downloads/download-bge-m3-job.yaml"
 oc apply -f "$DEPLOY_DIR/models/downloads/download-bge-reranker-job.yaml"
 warn "Model downloads started — all 4 models downloading from HuggingFace to MinIO."
-warn "Qwen (~9GB) ~15 min, Guardian (~5GB) ~10 min, BGE-M3 (~2GB) ~3 min, BGE-reranker (~1.5GB) ~2 min."
+warn "Qwen 7B GGUF (~4.7GB) ~5 min, Guardian (~5GB) ~10 min, BGE-M3 (~2GB) ~3 min, BGE-reranker (~1.5GB) ~2 min."
 
 echo ""
 info "=== Step 11: Apply model ServingRuntimes ==="
 oc apply -f "$DEPLOY_DIR/models/servingruntimes/"
-info "ServingRuntimes registered: vllm-gpu, llamacpp-cpu, text-embeddings-inference"
+info "ServingRuntimes registered: llamacpp-gpu, text-embeddings-inference"
 
 echo ""
 info "=== Step 12: Wait for model downloads to complete ==="
@@ -172,8 +175,8 @@ warn "Waiting for BGE-reranker download (timeout: 10 min)..."
 oc wait --for=condition=Complete job/download-bge-reranker -n rag-models --timeout=600s 2>/dev/null || warn "BGE-reranker download may still be running."
 warn "Waiting for Guardian download (timeout: 20 min)..."
 oc wait --for=condition=Complete job/download-guardian -n rag-models --timeout=1200s 2>/dev/null || warn "Guardian download may still be running."
-warn "Waiting for Qwen download (timeout: 30 min)..."
-oc wait --for=condition=Complete job/download-qwen -n rag-models --timeout=1800s 2>/dev/null || warn "Qwen download may still be running."
+warn "Waiting for Qwen download (timeout: 15 min)..."
+oc wait --for=condition=Complete job/download-qwen -n rag-models --timeout=900s 2>/dev/null || warn "Qwen download may still be running."
 
 echo ""
 info "=== Step 13: Deploy BGE-M3 embedding InferenceService ==="
@@ -188,13 +191,13 @@ warn "KServe storage initializer will pull BGE-reranker from MinIO..."
 oc wait --for=condition=Ready inferenceservice/bge-reranker -n rag-models --timeout=300s 2>/dev/null || warn "BGE-reranker InferenceService may still be starting."
 
 echo ""
-info "=== Step 15: Deploy vLLM InferenceService (Qwen 14B on GPU) ==="
+info "=== Step 15: Deploy Qwen 7B InferenceService (GPU, llama.cpp CUDA) ==="
 oc apply -f "$DEPLOY_DIR/models/vllm/vllm-qwen.yaml"
-warn "KServe storage initializer will pull Qwen from MinIO, then vLLM loads into GPU (~5 min)..."
-oc wait --for=condition=Ready inferenceservice/qwen-14b-awq -n rag-models --timeout=600s 2>/dev/null || warn "vLLM InferenceService may still be starting."
+warn "KServe storage initializer will pull Qwen 7B GGUF from MinIO..."
+oc wait --for=condition=Ready inferenceservice/qwen-7b -n rag-models --timeout=600s 2>/dev/null || warn "Qwen InferenceService may still be starting."
 
 echo ""
-info "=== Step 16: Deploy Guardian InferenceService (CPU) ==="
+info "=== Step 16: Deploy Guardian InferenceService (GPU, llama.cpp CUDA) ==="
 oc apply -f "$DEPLOY_DIR/models/guardian/guardian.yaml"
 warn "KServe storage initializer will pull Guardian from MinIO..."
 oc wait --for=condition=Ready inferenceservice/granite-guardian -n rag-models --timeout=300s 2>/dev/null || warn "Guardian InferenceService may still be starting."
@@ -211,8 +214,9 @@ oc apply -f "$DEPLOY_DIR/apps/webui/open-webui.yaml"
 wait_for_pods "rag-app" "app=open-webui" 120
 
 echo ""
-info "=== Step 19: Monitoring ==="
-oc apply -f "$DEPLOY_DIR/monitoring/servicemonitor-vllm.yaml"
+# info "=== Step 19: Monitoring (vLLM metrics) ==="
+# oc apply -f "$DEPLOY_DIR/monitoring/servicemonitor-vllm.yaml"
+info "Step 19 (vLLM monitoring) skipped — using llama.cpp, no vLLM metrics."
 
 echo ""
 info "=== Step 20: Build ingestion pipeline image ==="
@@ -227,6 +231,23 @@ oc apply -f "$DEPLOY_DIR/infrastructure/quay/subscription.yaml"
 warn "Waiting for Quay operator to install..."
 sleep 120
 wait_for_operator "openshift-operators" "Red Hat Quay" 180
+info "Creating quay-registry bucket in MinIO for Quay object storage..."
+oc exec -n rag-app deploy/minio -- sh -c 'curl -s -o /dev/null http://localhost:9000/quay-registry' 2>/dev/null || \
+  oc exec -n rag-app deploy/rag-orchestrator -- python3 -c "
+import urllib.request,hashlib,hmac,datetime
+h='minio.rag-app.svc:9000';ak='rag-minio-admin';sk='IJK4gek3P93mMjCzanmAnBX2rJEAOU';b='quay-registry';r='us-east-1'
+now=datetime.datetime.now(datetime.UTC);ds=now.strftime('%Y%m%d');ad=now.strftime('%Y%m%dT%H%M%SZ')
+def s(k,m):return hmac.new(k,m.encode(),hashlib.sha256).digest()
+sk2=s(s(s(s(('AWS4'+sk).encode(),ds),r),'s3'),'aws4_request');ph=hashlib.sha256(b'').hexdigest()
+c=f'PUT\n/{b}/\n\nhost:{h}\nx-amz-content-sha256:{ph}\nx-amz-date:{ad}\n\nhost;x-amz-content-sha256;x-amz-date\n{ph}'
+sc=f'{ds}/{r}/s3/aws4_request';sts=f'AWS4-HMAC-SHA256\n{ad}\n{sc}\n'+hashlib.sha256(c.encode()).hexdigest()
+sig=hmac.new(sk2,sts.encode(),hashlib.sha256).hexdigest()
+rq=urllib.request.Request(f'http://{h}/{b}/',method='PUT');rq.add_header('Host',h);rq.add_header('x-amz-date',ad)
+rq.add_header('x-amz-content-sha256',ph);rq.add_header('Authorization',f'AWS4-HMAC-SHA256 Credential={ak}/{sc}, SignedHeaders=host;x-amz-content-sha256;x-amz-date, Signature={sig}')
+try:urllib.request.urlopen(rq);print('Bucket created')
+except Exception as e:print(f'Bucket exists or error: {e}')
+" 2>/dev/null
+oc apply -f "$DEPLOY_DIR/infrastructure/quay/quay-config-bundle.yaml"
 oc apply -f "$DEPLOY_DIR/infrastructure/quay/quay-registry.yaml"
 warn "Quay registry deploying (~3-5 min for all components to start)."
 
@@ -240,6 +261,8 @@ oc apply -f "$PROJECT_ROOT/pipelines/namespace.yaml"
 oc apply -f "$PROJECT_ROOT/pipelines/rbac.yaml"
 oc apply -f "$PROJECT_ROOT/pipelines/webhook-secret.yaml"
 oc apply -f "$PROJECT_ROOT/pipelines/pipeline.yaml"
+warn "Waiting for Tekton Triggers CRDs to be established..."
+oc wait --for=condition=Established crd/eventlisteners.triggers.tekton.dev --timeout=120s
 oc apply -f "$PROJECT_ROOT/pipelines/triggers.yaml"
 info "Tekton pipeline infrastructure deployed."
 

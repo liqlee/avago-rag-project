@@ -24,6 +24,7 @@ spec:
               local_dir = snapshot_download(
                   os.environ['REPO_ID'],
                   local_dir='/tmp/model',
+                  allow_patterns=["*q4_k_m*", "*Q4_K_M*"],
                   local_dir_use_symlinks=False
               )
 
@@ -53,9 +54,9 @@ spec:
               PYEOF
           env:
             - name: REPO_ID
-              value: "Qwen/Qwen2.5-14B-Instruct-AWQ"
+              value: "Qwen/Qwen2.5-7B-Instruct-GGUF"
             - name: MODEL_PREFIX
-              value: "qwen-14b-awq"
+              value: "qwen-7b"
             - name: HOME
               value: /tmp
             - name: HF_HOME
